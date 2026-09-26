@@ -37,6 +37,7 @@ dsk/
   cookies.py     cookie store   | browser.py  shared Chromium helpers
   auth.py        email login    | waf.py       Turnstile/WAF bypass
   server.py      cookie server  | bypass.py    cookie CLI (python -m dsk.bypass)
+  token_store.py token resolution: env, cache file, credential auto-login |
   openai_adapter.py OpenAI translation (pure) |
   anthropic_adapter.py Anthropic translation (pure) |
   responses_adapter.py Responses translation + chain store |
@@ -67,7 +68,16 @@ Expose DeepSeek web chat as agent APIs so harnesses can use it:
 
 ```bash
 DEEPSEEK_AUTH_TOKEN=... uvicorn dsk.openai_server:app --port 8080
+# or single-setup auto-login (token cached in ~/.deepseek_token):
+DEEPSEEK_EMAIL=... DEEPSEEK_PASSWORD=... uvicorn dsk.openai_server:app --port 8080
 ```
+
+Auth resolution: explicit `DEEPSEEK_AUTH_TOKEN` wins, then the cache file
+(`DEEPSEEK_TOKEN_FILE` or `~/.deepseek_token`, mode 0600), then a browser
+login with `DEEPSEEK_EMAIL`/`DEEPSEEK_PASSWORD` whose token is cached.
+Expired cached tokens trigger one automatic re-login + retry on
+non-streaming requests (explicit-token setups fail fast with 401 instead).
+Startup exits with a usage error when nothing is configured.
 
 Endpoints: `GET /v1/models`, `POST /v1/chat/completions`
 (`stream: true/false`), `POST /v1/messages` (Anthropic),

@@ -2,6 +2,8 @@
 
 Run:
     DEEPSEEK_AUTH_TOKEN=... uvicorn dsk.openai_server:app --port 8080
+    # or with auto-login (token cached in ~/.deepseek_token):
+    DEEPSEEK_EMAIL=... DEEPSEEK_PASSWORD=... uvicorn dsk.openai_server:app
 
 Use with any OpenAI client:
     base_url="http://localhost:8080/v1", api_key="anything"
@@ -26,6 +28,7 @@ from pydantic import BaseModel
 from . import openai_adapter as adapter
 from . import anthropic_adapter as anthropic
 from . import responses_adapter as responses
+from . import token_store
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -137,11 +140,32 @@ def _check_api_key(request: Request) -> JSONResponse | None:
 def _default_client_factory():
     from .client import DeepSeekClient
 
-    token = os.getenv("DEEPSEEK_AUTH_TOKEN", "")
-    if not token:
-        raise AuthenticationError(
-            "Server misconfigured: set DEEPSEEK_AUTH_TOKEN")
-    return DeepSeekClient(token)
+    return DeepSeekClient(token_store.resolve_auth_token())
+
+
+async def _resilient_turn(factory, client, image_urls, prompt, thinking,
+                          search, tools, tool_choice, stop, model_type):
+    """Upload vision files + run one turn; re-login once on 401.
+
+    Retry only applies when the token came from credential auto-login
+    (explicit ``DEEPSEEK_AUTH_TOKEN`` setups fail fast instead).
+    """
+    try:
+        file_ids = await _run_blocking(
+            _prepare_vision_files, client, image_urls) if image_urls else []
+        return await _run_blocking(
+            _complete_turn, client, prompt, thinking, search,
+            tools, tool_choice, stop, model_type, file_ids)
+    except AuthenticationError:
+        if not token_store.auto_login_enabled():
+            raise
+        token_store.invalidate_cached_token()
+        fresh = await _run_blocking(factory)
+        file_ids = await _run_blocking(
+            _prepare_vision_files, fresh, image_urls) if image_urls else []
+        return await _run_blocking(
+            _complete_turn, fresh, prompt, thinking, search,
+            tools, tool_choice, stop, model_type, file_ids)
 
 
 async def _run_blocking(func, *args):
@@ -260,7 +284,7 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         from .exceptions import AuthenticationError as _AuthError
 
         try:
-            client = factory()
+            client = await _run_blocking(factory)
         except DeepSeekError as e:
             return _map_error(e)
         try:
@@ -291,7 +315,7 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         model_type = adapter.resolve_model_type(
             body.model, bool(image_urls), body.extra_flags)
         try:
-            client = factory()
+            client = await _run_blocking(factory)
         except DeepSeekError as e:
             return _map_error(e)
         except Exception as e:
@@ -310,12 +334,12 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             _debug_dump(request_id, body, prompt)
 
         try:
-            if image_urls:
-                file_ids = await _run_blocking(
-                    _prepare_vision_files, client, image_urls)
-            else:
-                file_ids = []
             if body.stream:
+                if image_urls:
+                    file_ids = await _run_blocking(
+                        _prepare_vision_files, client, image_urls)
+                else:
+                    file_ids = []
                 return _stream_response(
                     factory_client=client, request_id=request_id,
                     created=created, model=body.model, prompt=prompt,
@@ -323,10 +347,10 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
                     tools=body.tools, tool_choice=body.tool_choice,
                     stop=body.stop, model_type=model_type,
                     ref_file_ids=file_ids)
-            thinking_text, content, calls = await _run_blocking(
-                _complete_turn, client, prompt, thinking, search,
+            thinking_text, content, calls = await _resilient_turn(
+                factory, client, image_urls, prompt, thinking, search,
                 body.tools if preamble else None, body.tool_choice, body.stop,
-                model_type, file_ids)
+                model_type)
             if os.getenv("OPENAI_DEBUG"):
                 import sys as _sys
                 print(f"[debug {request_id}] RAW thinking chars={len(thinking_text)} "
@@ -359,7 +383,7 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             return _anthropic_error(400, "messages must not be empty")
         image_urls = anthropic.extract_images(body.system, body.messages)
         try:
-            client = factory()
+            client = await _run_blocking(factory)
         except DeepSeekError as e:
             return _map_anthropic_error(e)
         except Exception as e:
@@ -385,12 +409,12 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             _debug_dump(request_id=message_id, body=body, prompt=prompt)
 
         try:
-            if image_urls:
-                file_ids = await _run_blocking(
-                    _prepare_vision_files, client, image_urls)
-            else:
-                file_ids = []
             if body.stream:
+                if image_urls:
+                    file_ids = await _run_blocking(
+                        _prepare_vision_files, client, image_urls)
+                else:
+                    file_ids = []
                 thinking_text, content, calls = await _run_blocking(
                     _complete_turn, client, prompt, thinking, search,
                     tools if preamble else None, choice,
@@ -408,10 +432,10 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
 
                 return StreamingResponse(anthropic_events(),
                                          media_type="text/event-stream")
-            thinking_text, content, calls = await _run_blocking(
-                _complete_turn, client, prompt, thinking, search,
+            thinking_text, content, calls = await _resilient_turn(
+                factory, client, image_urls, prompt, thinking, search,
                 tools if preamble else None, choice,
-                None, model_type, file_ids)
+                None, model_type)
             content, truncated = adapter.truncate_to_token_budget(
                 content, body.max_tokens)
             prompt_tokens = adapter.estimate_tokens(prompt)
@@ -440,7 +464,7 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             return _error(400, "input must not be empty",
                           "invalid_request_error")
         try:
-            client = factory()
+            client = await _run_blocking(factory)
         except DeepSeekError as e:
             return _map_error(e)
         except Exception as e:
@@ -466,12 +490,12 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         created_at = responses.now_epoch()
 
         try:
-            if image_urls:
-                file_ids = await _run_blocking(
-                    _prepare_vision_files, client, image_urls)
-            else:
-                file_ids = []
             if body.stream:
+                if image_urls:
+                    file_ids = await _run_blocking(
+                        _prepare_vision_files, client, image_urls)
+                else:
+                    file_ids = []
                 thinking_text, content, calls = await _run_blocking(
                     _complete_turn, client, prompt, thinking, search,
                     tools if preamble else None, choice,
@@ -485,10 +509,10 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
                 store.save(response_id, input_items + payload["output"])
                 return StreamingResponse(_responses_stream(payload),
                                          media_type="text/event-stream")
-            thinking_text, content, calls = await _run_blocking(
-                _complete_turn, client, prompt, thinking, search,
+            thinking_text, content, calls = await _resilient_turn(
+                factory, client, image_urls, prompt, thinking, search,
                 tools if preamble else None, choice,
-                None, model_type, file_ids)
+                None, model_type)
             content, _ = adapter.truncate_to_token_budget(
                 content, body.max_output_tokens)
             payload = responses.build_response(
@@ -683,6 +707,24 @@ def _stream_response(factory_client, request_id: str, created: int,
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _preflight_auth() -> None:
+    """Fail fast when no auth is configured; report the active mode."""
+    import sys as _sys
+
+    if os.getenv(token_store.TOKEN_ENV):
+        print("Auth: explicit DEEPSEEK_AUTH_TOKEN", file=_sys.stderr)
+    elif token_store.load_cached_token():
+        print(f"Auth: cached token ({token_store.default_token_path()})",
+              file=_sys.stderr)
+    elif token_store.credentials_available():
+        print("Auth: no token yet; will auto-login with DEEPSEEK_EMAIL "
+              "on first request", file=_sys.stderr)
+    else:
+        print("Error: set DEEPSEEK_AUTH_TOKEN, or DEEPSEEK_EMAIL and "
+              "DEEPSEEK_PASSWORD for auto-login", file=_sys.stderr)
+        _sys.exit(2)
+
+
 app = build_app()
 
 if __name__ == "__main__":
@@ -701,4 +743,5 @@ if __name__ == "__main__":
         print("Warning: OPENAI_API_KEY is not set; any client can use this "
               "server and spend the DeepSeek account quota. Set OPENAI_API_KEY "
               "for any non-local exposure.", file=_sys.stderr)
+    _preflight_auth()
     uvicorn.run(app, host=args.host, port=args.port)
