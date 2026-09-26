@@ -13,7 +13,6 @@ import re
 import time
 import uuid
 
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 # OpenCode harness fallback: models with the harness format in their training
 # data sometimes emit DSML instead of <tool_call>. Delimiters use fullwidth
 # vertical bars (U+FF5C), e.g. <｜｜DSML｜｜ invoke name="write">.
@@ -95,6 +94,19 @@ def _tool_names(tools: list[dict] | None) -> list[str]:
     return names
 
 
+def _example_arguments(fn: dict) -> dict:
+    """Minimal placeholder args from the schema's first required property."""
+    params = fn.get("parameters", {}) or {}
+    props = params.get("properties", {}) or {}
+    required = params.get("required", []) or []
+    if required and required[0] in props:
+        return {required[0]: "..."}
+    if props:
+        first = next(iter(props))
+        return {first: "..."}
+    return {}
+
+
 def build_tool_preamble(tools: list[dict] | None, tool_choice) -> str:
     if not tools or tool_choice == "none":
         return ""
@@ -106,25 +118,37 @@ def build_tool_preamble(tools: list[dict] | None, tool_choice) -> str:
             "description": fn.get("description", ""),
             "parameters": fn.get("parameters", {"type": "object"}),
         })
+    first_name = schemas[0]["name"] if schemas else "example_function"
+    example = {"name": first_name,
+               "arguments": _example_arguments(
+                   (tools[0].get("function", {})
+                    if isinstance(tools[0], dict) else {}))}
     lines = [
-        "You have access to these functions:",
+        "You have access to these functions. Call them with <tool_call> blocks:",
         json.dumps(schemas, ensure_ascii=False),
-        "To call a function, output EXACTLY one block per call, no other "
-        "formatting around it:",
-        '<tool_call>{"name": "<function-name>", '
-        '"arguments": {<args-object>}}</tool_call>',
-        "You may emit multiple <tool_call> blocks in one response. "
-        "If no function is needed, answer normally without any <tool_call> block.",
-        "Do NOT use any other format: no DSML/XML tags, no <invoke> or "
-        "<parameter> blocks, no markdown code fences around calls.",
+        "Rules:",
+        "1. One function call = one block, exactly like this example "
+        "(replace values with real ones, keep the structure):",
+        f"<tool_call>{json.dumps(example, ensure_ascii=False)}</tool_call>",
+        "2. Emit each block separately. Do not nest blocks or wrap them "
+        "in markdown code fences.",
+        "3. Put any explanation BEFORE the blocks. Put nothing after "
+        "the last block.",
+        "4. Use only function names from the list above with arguments "
+        "matching their schemas.",
+        "5. Do NOT use any other format: no DSML/XML tags, no <invoke> or "
+        "<parameter> blocks.",
+        "6. If no function is needed, answer normally with no blocks.",
     ]
     if tool_choice == "required":
-        lines.append("You MUST call at least one function in this turn.")
+        lines.append("7. Your response MUST consist of at least one <tool_call> "
+                     "block and nothing else.")
     elif isinstance(tool_choice, dict):
         fn = tool_choice.get("function", {})
         if fn.get("name"):
             lines.append(
-                f"You MUST call the function \"{fn['name']}\" in this turn.")
+                f"7. Your response MUST consist of a <tool_call> block for "
+                f"\"{fn['name']}\" and nothing else.")
     return "\n".join(lines)
 
 
@@ -134,6 +158,45 @@ def _new_call(name: str, arguments: dict) -> dict:
         "name": name,
         "arguments": arguments,
     }
+
+
+def _scan_tool_call_blocks(text: str) -> list[tuple[int, int, Any]]:
+    """Find ``<tool_call>`` JSON payloads via balanced decoding.
+
+    Tolerates missing ``</tool_call>`` closers and trailing junk (e.g. model
+    mixing DSML closers into the block). Returns ``(start, end, payload)``
+    with ``payload=None`` for invalid blocks (still stripped from the text).
+    """
+    decoder = json.JSONDecoder()
+    spans = []
+    idx = 0
+    while True:
+        open_at = text.find("<tool_call>", idx)
+        if open_at == -1:
+            break
+        start = open_at + len("<tool_call>")
+        segment = text[start:]
+        stripped = segment.lstrip()
+        try:
+            payload, end = decoder.raw_decode(stripped)
+            end_abs = start + (len(segment) - len(stripped)) + end
+            spans.append((open_at, end_abs, payload))
+            idx = end_abs
+            continue
+        except ValueError:
+            pass
+        closer = text.find("</tool_call>", start)
+        if closer == -1:
+            idx = start
+        else:
+            spans.append((open_at, closer + len("</tool_call>"), None))
+            idx = closer + len("</tool_call>")
+    return spans
+
+
+def _strip_stray_dsml(text: str) -> str:
+    text = re.sub(r"</?｜｜DSML｜｜[^>]*>", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _coerce_arguments(arguments) -> dict | None:
@@ -159,27 +222,31 @@ def parse_tool_calls(text: str, tools: list[dict] | None
     """
     known = set(_tool_names(tools))
     calls = []
+    spans = []
 
-    def _replace(match: re.Match) -> str:
-        raw = match.group(1)
-        try:
-            payload = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return ""
+    for open_at, end_abs, payload in _scan_tool_call_blocks(text):
+        spans.append((open_at, end_abs))
         if not isinstance(payload, dict):
-            return ""
+            continue
         name = payload.get("name")
-        if not name or (known and name not in known):
-            return ""
         arguments = _coerce_arguments(payload.get("arguments", {}))
-        if arguments is None:
-            return ""
+        if not name or (known and name not in known) or arguments is None:
+            continue
         calls.append(_new_call(name, arguments))
-        return ""
 
-    clean_text = TOOL_CALL_RE.sub(_replace, text).strip()
     if calls:
-        return clean_text, calls
+        kept = []
+        cursor = 0
+        closer = "</tool_call>"
+        for open_at, end_abs in spans:
+            kept.append(text[cursor:open_at])
+            cursor = end_abs
+            tail = text[cursor:]
+            stripped = tail.lstrip()
+            if stripped.startswith(closer):
+                cursor += len(tail) - len(stripped) + len(closer)
+        kept.append(text[cursor:])
+        return _strip_stray_dsml("".join(kept)), calls
     return parse_dsml_calls(text, tools)
 
 
@@ -220,9 +287,8 @@ def parse_dsml_calls(text: str, tools: list[dict] | None
         return ""
 
     without_invokes = DSML_INVOKE_RE.sub(_replace_invoke, text)
-    clean_text = DSML_CALLS_RE.sub("", without_invokes).strip()
-    clean_text = re.sub(r"\n{3,}", "\n\n", clean_text)
-    return clean_text, calls
+    clean_text = DSML_CALLS_RE.sub("", without_invokes)
+    return _strip_stray_dsml(clean_text), calls
 
 
 def resolve_flags(model: str, extra: dict) -> tuple[bool, bool]:

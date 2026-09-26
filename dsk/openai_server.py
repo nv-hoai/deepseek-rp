@@ -278,10 +278,10 @@ def _stream_response(factory_client, request_id: str, created: int,
         if content:
             yield adapter.sse_chunk(request_id, created, model,
                                     {"content": content})
-        for call in calls:
+        for index, call in enumerate(calls):
             yield adapter.sse_chunk(request_id, created, model, {
                 "tool_calls": [{
-                    "index": 0,
+                    "index": index,
                     "id": call["id"],
                     "type": "function",
                     "function": {

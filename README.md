@@ -76,7 +76,10 @@ Tool calling (agent executes tools): pass standard OpenAI `tools` +
 `tool_choice` (`auto`/`none`/`required` or `{"function": {"name": ...}}`).
 The server injects the schemas into the prompt and parses
 `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` blocks back into
-`tool_calls` (`finish_reason: "tool_calls"`). Without tools, streaming
+`tool_calls` (`finish_reason: "tool_calls"`). The prompt uses numbered rules
+plus a concrete example, and the parser tolerates missing closers, mixed
+DSML closers, and harness-native DSML `<invoke>` blocks as fallback.
+Multiple calls in one turn are returned with distinct stream indices.
 forwards DeepSeek tokens live; with tools it buffers, then emits
 `reasoning_content`, `content`, and `tool_calls` chunks plus `data: [DONE]`.
 

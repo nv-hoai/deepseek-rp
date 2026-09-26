@@ -40,10 +40,23 @@ def test_preamble_none_choice():
     auto = adapter.build_tool_preamble(tools, "auto")
     assert "get_time" in auto and "<tool_call>" in auto
     required = adapter.build_tool_preamble(tools, "required")
-    assert "MUST call" in required
+    assert "MUST consist of at least one <tool_call>" in required
     specific = adapter.build_tool_preamble(
         tools, {"type": "function", "function": {"name": "get_time"}})
-    assert "get_time" in specific and "MUST call" in specific
+    assert "get_time" in specific and "MUST consist" in specific
+
+
+def test_preamble_has_example_and_rules():
+    tools = [{"type": "function",
+              "function": {"name": "get_time",
+                           "description": "Current time",
+                           "parameters": {"type": "object",
+                                          "properties": {},
+                                          "required": []}}}]
+    preamble = adapter.build_tool_preamble(tools, "auto")
+    assert "<tool_call>" in preamble
+    assert "get_time" in preamble
+    assert "DSML" in preamble
 
 
 def test_parse_tool_calls_round_trip():
@@ -243,3 +256,27 @@ def test_tool_call_format_wins_over_dsml():
     _, calls = adapter.parse_tool_calls(text, tools)
     assert [c["name"] for c in calls] == ["write"]
     assert calls[0]["arguments"] == {"path": "a"}
+
+
+def test_parse_hybrid_tool_call_with_dsml_tail():
+    tools = [{"type": "function",
+              "function": {"name": "shell",
+                           "parameters": {"type": "object"}}}]
+    text = ('<tool_call>{"name": "shell", "arguments": {"command": "ls"}}</｜｜DSML｜｜ parameter>\n'
+            '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+    content, calls = adapter.parse_tool_calls(text, tools)
+    assert [c["name"] for c in calls] == ["shell"]
+    assert calls[0]["arguments"] == {"command": "ls"}
+    assert "DSML" not in content
+
+
+def test_parse_multiple_tool_call_blocks():
+    tools = [{"type": "function",
+              "function": {"name": "edit",
+                           "parameters": {"type": "object"}}}]
+    text = ('<tool_call>{"name": "edit", "arguments": {"a": 1}}</tool_call>\n'
+            '<tool_call>{"name": "edit", "arguments": {"a": 2}}</tool_call>\n'
+            '<tool_call>{"name": "edit", "arguments": {"a": 3}}</tool_call>')
+    _, calls = adapter.parse_tool_calls(text, tools)
+    assert [c["arguments"] for c in calls] == [{"a": 1}, {"a": 2}, {"a": 3}]
+    assert len({c["id"] for c in calls}) == 3
