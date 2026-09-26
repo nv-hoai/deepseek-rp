@@ -1,0 +1,15 @@
+[tools]
+python = "3.12"
+
+[tasks.serve]
+description = "Run the DeepSeek agent API server (reads .env)"
+run = "python -m dsk.openai_server"
+
+[tasks.test]
+description = "Run the unit test suite"
+run = "python -m pytest tests/ -q"
+
+[env]
+# Puts .venv/bin first so bare `uvicorn` / `pytest` resolve (_.path is
+# mise's supported way to extend PATH; plain PATH entries are ignored).
+_.path = ["{{config_root}}/.venv/bin"]
