@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import json
 from collections.abc import Generator
 
 from curl_cffi import requests
@@ -14,7 +16,13 @@ from .headers import build_headers
 from .models import ChatRequest, Chunk, PowChallenge
 from .pow import DeepSeekPOW
 from .sse import SseParser
-from .transport import HttpTransport, check_http_error, is_waf_challenge, warn_version_once
+from .transport import (
+    HttpTransport,
+    check_biz_error,
+    check_http_error,
+    is_waf_challenge,
+    warn_version_once,
+)
 
 
 class DeepSeekClient:
@@ -220,8 +228,20 @@ class DeepSeekClient:
             check_http_error(response.status_code, response.headers, error_text)
 
         parser = SseParser()
+        lines = response.iter_lines()
+        # A muted/banned account gets a bare JSON error envelope instead of
+        # SSE (HTTP 200). Surface it instead of streaming empty silence.
+        first = next(lines, b"")
+        text = (first.decode("utf-8", "ignore")
+                if isinstance(first, bytes) else str(first))
+        if text and not text.startswith(("event:", "data:")):
+            try:
+                check_biz_error(json.loads(text),
+                                f"POST {config.ENDPOINT_COMPLETION}")
+            except json.JSONDecodeError:
+                pass
         try:
-            for raw in response.iter_lines():
+            for raw in itertools.chain([first], lines):
                 for chunk in parser.feed(raw):
                     yield chunk
                     if chunk.type == "finish":

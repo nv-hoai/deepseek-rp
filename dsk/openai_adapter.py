@@ -294,15 +294,17 @@ def parse_dsml_calls(text: str, tools: list[dict] | None
 
 
 def resolve_flags(model: str, extra: dict) -> tuple[bool, bool]:
-    """Map OpenAI model name + extra body to DeepSeek flags."""
+    """Map model name + extra body to DeepSeek flags.
+
+    Only axis is reasoning: ``deepseek-reasoner`` thinks, ``deepseek``
+    does not. Vision switches on automatically with images; search is
+    opt-in via ``search_enabled``. Explicit extras always win.
+    """
     thinking = extra.get("thinking_enabled")
     search = extra.get("search_enabled")
     name = (model or "").lower()
     if thinking is None:
-        thinking = not ("chat" in name and "reason" not in name
-                        and "r1" not in name and "think" not in name)
-        if not name or name == "default":
-            thinking = True
+        thinking = ("reason" in name or "r1" in name or "think" in name)
     if search is None:
         search = False
     return bool(thinking), bool(search)
@@ -336,11 +338,15 @@ def contains_image(messages: list[dict]) -> bool:
 
 
 def resolve_model_type(model: str, has_images: bool, extra: dict) -> str:
-    """Map model name + image presence to a DeepSeek ``model_type``."""
+    """Map image presence to a DeepSeek ``model_type``.
+
+    Vision is not a separate model: it switches on whenever images are
+    attached, for both ``deepseek`` and ``deepseek-reasoner``.
+    """
     override = (extra or {}).get("model_type")
     if override in ("default", "vision"):
         return override
-    if has_images or "vision" in (model or "").lower():
+    if has_images:
         return "vision"
     return "default"
 

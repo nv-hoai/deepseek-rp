@@ -84,18 +84,18 @@ Endpoints: `GET /v1/models`, `POST /v1/chat/completions`
 `POST /v1/responses` + `GET /v1/responses/{id}` (Responses),
 `GET /health`, `GET /health/deep` (validates the DeepSeek token).
 
-Models: `deepseek-chat` (no thinking), `deepseek-reasoner` (thinking,
-returned as `reasoning_content`), `deepseek-vision` (vision model for image
-input). Per-request overrides are accepted as
+Models (exactly two; the only axis is reasoning): `deepseek` (no
+thinking) and `deepseek-reasoner` (thinking, returned as
+`reasoning_content`). Per-request overrides are accepted as
 extra body fields: `thinking_enabled`, `search_enabled`, `model_type`.
 
 Vision (image input): pass standard image parts (`image_url` with http(s)
 URL or `data:` URI, Anthropic `image` blocks, Responses `input_image`).
 The server downloads/decodes each image, uploads it via
 `POST /api/v0/file/upload_file`, waits for processing, and sends the
-completion with `model_type="vision"` + `ref_file_ids`. Any model switches
-to vision automatically when images are present; `deepseek-vision` selects
-it with no images attached (text-only vision turn).
+completion with `model_type="vision"` + `ref_file_ids`. Either model
+switches to vision automatically when images are present. Search is
+opt-in for both via `search_enabled`.
 
 Tool calling (agent executes tools): pass standard OpenAI `tools` +
 `tool_choice` (`auto`/`none`/`required` or `{"function": {"name": ...}}`).

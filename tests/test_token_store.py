@@ -114,7 +114,7 @@ def test_non_streaming_relogin_recovers(isolated_env, monkeypatch):
 
     response = TestClient(build_app(factory)).post(
         "/v1/chat/completions", json={
-            "model": "deepseek-chat",
+            "model": "deepseek",
             "messages": [{"role": "user", "content": "hi"}],
         })
     assert response.status_code == 200
@@ -131,7 +131,7 @@ def test_explicit_token_does_not_retry(monkeypatch):
 
     response = TestClient(build_app(factory)).post(
         "/v1/chat/completions", json={
-            "model": "deepseek-chat",
+            "model": "deepseek",
             "messages": [{"role": "user", "content": "hi"}],
         })
     assert response.status_code == 401

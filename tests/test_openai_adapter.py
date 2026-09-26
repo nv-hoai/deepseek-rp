@@ -85,7 +85,7 @@ def test_parse_tool_calls_drops_unknown_and_bad_json():
 
 
 def test_resolve_flags():
-    assert adapter.resolve_flags("deepseek-chat", {}) == (False, False)
+    assert adapter.resolve_flags("deepseek", {}) == (False, False)
     assert adapter.resolve_flags("deepseek-reasoner", {}) == (True, False)
     assert adapter.resolve_flags("x", {"thinking_enabled": False,
                                        "search_enabled": True}) == (False, True)
@@ -127,13 +127,13 @@ def test_models_endpoint():
     response = client.get("/v1/models")
     assert response.status_code == 200
     ids = [m["id"] for m in response.json()["data"]]
-    assert "deepseek-chat" in ids and "deepseek-reasoner" in ids
+    assert ids == ["deepseek", "deepseek-reasoner"]
 
 
 def test_chat_non_stream_no_tools():
     client, _ = _client("2+2=4")
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "messages": [{"role": "user", "content": "What is 2+2?"}],
     })
     assert response.status_code == 200
@@ -153,7 +153,7 @@ def test_chat_returns_tool_calls():
     client = TestClient(build_app(
         lambda: _FakeClient(text=fake_text)))
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "messages": [{"role": "user", "content": "What time is it?"}],
         "tools": tools,
         "tool_choice": "auto",
@@ -173,7 +173,7 @@ def test_chat_stream_tool_calls_ends_with_done():
     client = TestClient(build_app(lambda: _FakeClient(
         text='<tool_call>{"name": "get_time", "arguments": {}}</tool_call>')))
     with client.stream("POST", "/v1/chat/completions", json={
-            "model": "deepseek-chat",
+            "model": "deepseek",
             "messages": [{"role": "user", "content": "time?"}],
             "tools": tools,
             "stream": True,
@@ -187,14 +187,14 @@ def test_chat_stream_tool_calls_ends_with_done():
 def test_chat_empty_messages_rejected():
     client, _ = _client()
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-chat", "messages": []})
+        "model": "deepseek", "messages": []})
     assert response.status_code == 400
 
 
 def test_chat_stream_text_streams_content():
     client, _ = _client("hello world")
     with client.stream("POST", "/v1/chat/completions", json={
-            "model": "deepseek-chat",
+            "model": "deepseek",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
     }) as response:
@@ -213,7 +213,7 @@ def test_auth_error_maps_to_401():
 
     client = TestClient(build_app(lambda: _BadClient()))
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "messages": [{"role": "user", "content": "hi"}]})
     assert response.status_code == 401
 

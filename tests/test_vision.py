@@ -58,12 +58,15 @@ def test_extract_responses_images():
 
 
 def test_resolve_model_type():
-    assert adapter.resolve_model_type("deepseek-chat", False, {}) == "default"
+    assert adapter.resolve_model_type("deepseek", False, {}) == "default"
     assert adapter.resolve_model_type(
-        "deepseek-chat", True, {}) == "vision"
-    assert adapter.resolve_model_type("deepseek-vision", False, {}) == "vision"
+        "deepseek", True, {}) == "vision"
     assert adapter.resolve_model_type(
-        "deepseek-chat", False, {"model_type": "vision"}) == "vision"
+        "deepseek-reasoner", False, {}) == "default"
+    assert adapter.resolve_model_type(
+        "deepseek-reasoner", True, {}) == "vision"
+    assert adapter.resolve_model_type(
+        "deepseek", False, {"model_type": "vision"}) == "vision"
 
 
 def test_image_placeholder_in_prompt():
@@ -174,7 +177,7 @@ def test_chat_vision_end_to_end():
     fake = _VisionClient()
     client = TestClient(build_app(lambda: fake))
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": "What is this?"},
             {"type": "image_url", "image_url": {"url": TINY_PNG_URI}},
@@ -188,15 +191,15 @@ def test_chat_vision_end_to_end():
         "a pink square"
 
 
-def test_chat_vision_model_name_without_images():
+def test_chat_text_only_sends_default_model_type():
     fake = _VisionClient()
     client = TestClient(build_app(lambda: fake))
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-vision",
+        "model": "deepseek",
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert response.status_code == 200
-    assert fake.last_model_type == "vision"
+    assert fake.last_model_type == "default"
     assert fake.last_ref_file_ids == []
     assert fake.uploaded == []
 
@@ -205,7 +208,7 @@ def test_chat_bad_image_is_400():
     fake = _VisionClient()
     client = TestClient(build_app(lambda: fake))
     response = client.post("/v1/chat/completions", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:xyz"}},
         ]}],
@@ -214,7 +217,7 @@ def test_chat_bad_image_is_400():
     assert fake.uploaded == []
 
 
-def test_models_include_vision():
+def test_models_lists_exactly_two():
     client = TestClient(build_app(lambda: _VisionClient()))
     ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
-    assert "deepseek-vision" in ids
+    assert ids == ["deepseek", "deepseek-reasoner"]

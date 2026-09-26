@@ -109,7 +109,7 @@ def test_anthropic_endpoint():
     client = TestClient(build_app(lambda: _FakeClient(
         thinking="reason", text="hello")))
     response = client.post("/v1/messages", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "max_tokens": 64,
         "messages": [{"role": "user", "content": "hi"}],
     })
@@ -126,7 +126,7 @@ def test_anthropic_endpoint_tool_use():
     client = TestClient(build_app(lambda: _FakeClient(
         text='<tool_call>{"name": "get_time", "arguments": {}}</tool_call>')))
     response = client.post("/v1/messages", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "max_tokens": 64,
         "messages": [{"role": "user", "content": "time?"}],
         "tools": tools,
@@ -160,7 +160,7 @@ def test_anthropic_endpoint_vision_uploads_images():
     fake = _VisionFakeClient(text="a pink square")
     client = TestClient(build_app(lambda: fake))
     response = client.post("/v1/messages", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "max_tokens": 64,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": "What is this?"},
@@ -178,7 +178,7 @@ def test_anthropic_endpoint_vision_uploads_images():
 def test_anthropic_stream_events():
     client = TestClient(build_app(lambda: _FakeClient(text="hi")))
     with client.stream("POST", "/v1/messages", json={
-            "model": "deepseek-chat",
+            "model": "deepseek",
             "max_tokens": 64,
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
@@ -196,7 +196,7 @@ def test_responses_endpoint_and_chain():
     client = TestClient(build_app(lambda: _FakeClient(
         text='<tool_call>{"name": "get_time", "arguments": {}}</tool_call>')))
     first = client.post("/v1/responses", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "input": "What time is it?",
         "tools": tools,
     })
@@ -208,7 +208,7 @@ def test_responses_endpoint_and_chain():
     response_id = body["id"]
 
     followup = client.post("/v1/responses", json={
-        "model": "deepseek-chat",
+        "model": "deepseek",
         "previous_response_id": response_id,
         "input": [{"type": "function_call_output", "call_id": "c1",
                    "output": "noon"}],
@@ -223,7 +223,7 @@ def test_responses_endpoint_and_chain():
 def test_responses_stream_events():
     client = TestClient(build_app(lambda: _FakeClient(text="hi")))
     with client.stream("POST", "/v1/responses", json={
-            "model": "deepseek-chat",
+            "model": "deepseek",
             "input": "hi",
             "stream": True,
     }) as response:

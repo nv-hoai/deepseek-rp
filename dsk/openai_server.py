@@ -47,17 +47,15 @@ except ImportError:
     pass
 
 MODELS = [
-    {"id": "deepseek-chat", "object": "model", "owned_by": "deepseek",
+    {"id": "deepseek", "object": "model", "owned_by": "deepseek",
      "description": "DeepSeek web chat without thinking"},
     {"id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek",
      "description": "DeepSeek web chat with thinking (reasoning_content)"},
-    {"id": "deepseek-vision", "object": "model", "owned_by": "deepseek",
-     "description": "DeepSeek web chat vision model (image input)"},
 ]
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "deepseek-chat"
+    model: str = "deepseek"
     messages: list[dict[str, Any]]
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
@@ -77,7 +75,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 class AnthropicMessagesRequest(BaseModel):
-    model: str = "deepseek-chat"
+    model: str = "deepseek"
     max_tokens: int = 1024
     messages: list[dict[str, Any]]
     system: Any = None
@@ -98,7 +96,7 @@ class AnthropicMessagesRequest(BaseModel):
 
 
 class ResponsesRequest(BaseModel):
-    model: str = "deepseek-chat"
+    model: str = "deepseek"
     input: Any = None
     instructions: str | None = None
     tools: list[dict[str, Any]] | None = None
