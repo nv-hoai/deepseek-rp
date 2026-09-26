@@ -52,11 +52,23 @@ def resolve_browser_path(explicit: str | None = None) -> str | None:
             or shutil.which("chromium"))
 
 
+def _free_local_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def make_chromium_options(headless: bool = True, proxy: str | None = None,
                           user_data_dir: str | None = None):
     from DrissionPage import ChromiumOptions
 
-    options = ChromiumOptions().auto_port()
+    options = ChromiumOptions()
+    # NOTE: DrissionPage auto_port() leaves address empty in some
+    # environments (connect fails with "not enough values to unpack"), so
+    # allocate an explicit free debug port instead.
+    options.set_local_port(_free_local_port())
     binary = resolve_browser_path()
     if binary:
         try:
