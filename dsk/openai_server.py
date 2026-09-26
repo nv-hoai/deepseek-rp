@@ -29,14 +29,22 @@ from . import openai_adapter as adapter
 from . import anthropic_adapter as anthropic
 from . import responses_adapter as responses
 from . import token_store
-from .exceptions import (
-    APIError,
+from .exceptions import (    APIError,
     AuthenticationError,
     DeepSeekError,
     NetworkError,
     RateLimitError,
     WafError,
 )
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    # Import-time so `uvicorn dsk.openai_server:app` (which skips __main__)
+    # picks up .env too. Real environment variables always take precedence.
+    _load_dotenv()
+except ImportError:
+    pass
 
 MODELS = [
     {"id": "deepseek-chat", "object": "model", "owned_by": "deepseek",

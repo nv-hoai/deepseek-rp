@@ -99,6 +99,12 @@ if __name__ == "__main__":
     import os
     import sys
 
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
     _email = os.getenv("DEEPSEEK_EMAIL") or (sys.argv[1] if len(sys.argv) > 1 else "")
     _password = os.getenv("DEEPSEEK_PASSWORD") or (sys.argv[2] if len(sys.argv) > 2 else "")
     if not _email or not _password:

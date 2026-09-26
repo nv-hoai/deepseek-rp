@@ -64,12 +64,12 @@ in `models.py`/`sse.py` only; `client.py` contains no parsing.
 
 ## OpenAI-compatible server (agent integration)
 
-Expose DeepSeek web chat as agent APIs so harnesses can use it:
+Expose DeepSeek web chat as agent APIs so harnesses can use it.
+Configure once via `.env` (see `.env.example`); real env vars override it:
 
 ```bash
-DEEPSEEK_AUTH_TOKEN=... uvicorn dsk.openai_server:app --port 8080
-# or single-setup auto-login (token cached in ~/.deepseek_token):
-DEEPSEEK_EMAIL=... DEEPSEEK_PASSWORD=... uvicorn dsk.openai_server:app --port 8080
+cp .env.example .env   # then fill in DEEPSEEK_AUTH_TOKEN or email/password
+uvicorn dsk.openai_server:app --port 8080
 ```
 
 Auth resolution: explicit `DEEPSEEK_AUTH_TOKEN` wins, then the cache file
