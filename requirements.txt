@@ -7,5 +7,6 @@ uvicorn
 requests
 python-dotenv
 pytest
+httpx
 # Optional: only needed for server.py --headless without a display
 # pyvirtualdisplay

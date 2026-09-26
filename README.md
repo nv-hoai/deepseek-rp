@@ -37,7 +37,10 @@ dsk/
   cookies.py     cookie store   | browser.py  shared Chromium helpers
   auth.py        email login    | waf.py       Turnstile/WAF bypass
   server.py      cookie server  | bypass.py    cookie CLI (python -m dsk.bypass)
+  openai_adapter.py OpenAI translation (pure) |
+  openai_server.py  OpenAI-compat API (uvicorn dsk.openai_server:app)
 tests/test_sse.py  fixtures for the volatile streaming format
+tests/test_openai_adapter.py  OpenAI translation + endpoint tests
 ```
 
 Rules: frontend-mirroring literals live in `config.py`; raw JSON is converted
@@ -52,6 +55,33 @@ in `models.py`/`sse.py` only; `client.py` contains no parsing.
    `chat_session_id` payload (new fields go to `models.ChatRequest`),
    `NewSSEEventName` + `response/fragments` (update `sse.py` + fixtures).
 3. Run `pytest tests/ -q`.
+
+## OpenAI-compatible server (agent integration)
+
+Expose DeepSeek web chat as an OpenAI Chat Completions API so agent
+frameworks can use it with `base_url="http://localhost:8080/v1"`.
+
+```bash
+DEEPSEEK_AUTH_TOKEN=... uvicorn dsk.openai_server:app --port 8080
+```
+
+Endpoints: `GET /v1/models`, `POST /v1/chat/completions`
+(`stream: true/false`), `GET /health`.
+
+Models: `deepseek-chat` (no thinking), `deepseek-reasoner` (thinking,
+returned as `reasoning_content`). Per-request overrides are accepted as
+extra body fields: `thinking_enabled`, `search_enabled`.
+
+Tool calling (agent executes tools): pass standard OpenAI `tools` +
+`tool_choice` (`auto`/`none`/`required` or `{"function": {"name": ...}}`).
+The server injects the schemas into the prompt and parses
+`<tool_call>{"name": ..., "arguments": {...}}</tool_call>` blocks back into
+`tool_calls` (`finish_reason: "tool_calls"`). Without tools, streaming
+forwards DeepSeek tokens live; with tools it buffers, then emits
+`reasoning_content`, `content`, and `tool_calls` chunks plus `data: [DONE]`.
+
+Set `OPENAI_API_KEY` to require a client key; otherwise any key is accepted
+and the server's `DEEPSEEK_AUTH_TOKEN` is used for all requests.
 
 ## Installation
 
