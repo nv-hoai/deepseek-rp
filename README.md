@@ -7,22 +7,53 @@ A Python package for interacting with the DeepSeek AI chat API. This package pro
 - [whop.com/reverser-academy](https://whop.com/reverser-academy/) (beta)
 
 
-> ⚠️ **Service Notice**: DeepSeek API is currently experiencing high load. Work is in progress to integrate additional API providers. Please expect intermittent errors.
+> **Service Notice**: DeepSeek API is currently experiencing high load. Work is in progress to integrate additional API providers. Please expect intermittent errors.
 
-> 📝 **Note**: If you encounter any errors, please ensure you are using the latest version of this library. The DeepSeek API may change frequently, and updates are released to maintain compatibility.
+> **Note**: If you encounter any errors, please ensure you are using the latest version of this library. The DeepSeek API may change frequently, and updates are released to maintain compatibility.
 
-## ✨ Features
+## Features
 
-- 🔄 **Streaming Responses**: Real-time interaction with token-by-token output
-- 🤔 **Thinking Process**: Optional visibility into the model's reasoning steps
-- 🔍 **Web Search**: Optional integration for up-to-date information
-- 💬 **Session Management**: Persistent chat sessions with conversation history
-- ⚡ **Efficient PoW**: WebAssembly-based proof of work implementation
-- 🛡️ **Error Handling**: Comprehensive error handling with specific exceptions
-- ⏱️ **No Timeouts**: Designed for long-running conversations without timeouts
-- 🧵 **Thread Support**: Parent message tracking for threaded conversations
+- **Streaming Responses**: Real-time interaction with token-by-token output
+- **Thinking Process**: Optional visibility into the model's reasoning steps
+- **Web Search**: Optional integration for up-to-date information
+- **Session Management**: Persistent chat sessions with conversation history
+- **Efficient PoW**: WebAssembly-based proof of work implementation
+- **Error Handling**: Comprehensive error handling with specific exceptions
+- **No Timeouts**: Designed for long-running conversations without timeouts
+- **Thread Support**: Parent message tracking for threaded conversations
 
-## 📦 Installation
+## Project layout
+
+```
+dsk/
+  __init__.py    public exports (DeepSeekClient, Chunk, errors)
+  client.py      orchestration only (sessions, chat, PoW wiring)
+  config.py      single source of truth: URLs, endpoints, UA, versions
+  models.py      typed requests/chunks (ChatRequest, Chunk, PowChallenge)
+  transport.py   curl-cffi wrapper, WAF detection, biz-code mapping
+  sse.py         stateful SSE parser (covered by tests/test_sse.py)
+  pow.py         WASM PoW solver
+  headers.py     header builder | device.py  device-id store
+  cookies.py     cookie store   | browser.py  shared Chromium helpers
+  auth.py        email login    | waf.py       Turnstile/WAF bypass
+  server.py      cookie server  | bypass.py    cookie CLI (python -m dsk.bypass)
+tests/test_sse.py  fixtures for the volatile streaming format
+```
+
+Rules: frontend-mirroring literals live in `config.py`; raw JSON is converted
+in `models.py`/`sse.py` only; `client.py` contains no parsing.
+
+## Updating after frontend changes
+
+1. Fetch `https://fe-static.deepseek.com/chat/static/main.<hash>.js`
+   (URL is in the HTML fallback served by `/api/v0/auth/login`).
+2. Search it for: `/api/v0/` (endpoints), `x-client-version` / `appVersion`
+   (bump `config.CLIENT_VERSION`), `X-DS-PoW-Response` (PoW shape),
+   `chat_session_id` payload (new fields go to `models.ChatRequest`),
+   `NewSSEEventName` + `response/fragments` (update `sse.py` + fixtures).
+3. Run `pytest tests/ -q`.
+
+## Installation
 
 1. Clone the repository:
 ```bash
@@ -35,7 +66,7 @@ cd deepseek4free
 pip install -r requirements.txt
 ```
 
-## 🔑 Authentication
+## Authentication
 
 To use this package, you need a DeepSeek auth token. Here's how to obtain it:
 
@@ -70,36 +101,27 @@ Alternatively, you can get the token from network requests:
 6. Find the request headers
 7. Copy the `authorization` token (without 'Bearer ' prefix)
 
-### Handling Cloudflare Challenges
+### Handling WAF Challenges
 
-If you encounter Cloudflare challenges ("Just a moment..." page), you'll need to get a `cf_clearance` cookie. Run this command:
+If login or the web app hits AWS WAF (`aws-waf-token`), capture cookies:
 
 ```bash
 python -m dsk.bypass
 ```
 
-This will:
-1. Open an undetected browser
-2. Visit DeepSeek and solve the Cloudflare challenge
-3. Capture and save the `cf_clearance` cookie
-4. The cookie will be automatically used in future requests
+This opens Chromium with the pinned Chrome 132 UA, waits for the WAF token,
+and saves it to `dsk/cookies.json` (auto-loaded by the client). The chat
+completion API itself normally works without cookies.
 
-You only need to run this when:
-- You get Cloudflare challenges in your requests
-- Your existing cf_clearance cookie expires
-- You see the error "Please wait a few minutes before trying again"
-
-The captured cookie will be stored in `dsk/cookies.json` and automatically used by the API.
-
-## 📚 Usage
+## Usage
 
 ### Basic Example
 
 ```python
-from dsk.api import DeepSeekAPI
+from dsk import DeepSeekClient
 
 # Initialize with your auth token
-api = DeepSeekAPI("YOUR_AUTH_TOKEN")
+api = DeepSeekClient("YOUR_AUTH_TOKEN")
 
 # Create a new chat session
 chat_id = api.create_chat_session()
@@ -107,8 +129,8 @@ chat_id = api.create_chat_session()
 # Simple chat completion
 prompt = "What is Python?"
 for chunk in api.chat_completion(chat_id, prompt):
-    if chunk['type'] == 'text':
-        print(chunk['content'], end='', flush=True)
+    if chunk.type == 'text':
+        print(chunk.content, end='', flush=True)
 ```
 
 ### Advanced Features
@@ -124,10 +146,10 @@ for chunk in api.chat_completion(
     "Explain quantum computing",
     thinking_enabled=True
 ):
-    if chunk['type'] == 'thinking':
-        print(f"🤔 Thinking: {chunk['content']}")
-    elif chunk['type'] == 'text':
-        print(chunk['content'], end='', flush=True)
+    if chunk.type == 'thinking':
+        print(f"Thinking: {chunk.content}")
+    elif chunk.type == 'text':
+        print(chunk.content, end='', flush=True)
 ```
 
 #### Web Search Integration
@@ -142,15 +164,16 @@ for chunk in api.chat_completion(
     thinking_enabled=True,
     search_enabled=True
 ):
-    if chunk['type'] == 'thinking':
-        print(f"🔍 Searching: {chunk['content']}")
-    elif chunk['type'] == 'text':
-        print(chunk['content'], end='', flush=True)
+    if chunk.type == 'search':
+        print(f"Searching: {chunk.content}")
+    elif chunk.type == 'text':
+        print(chunk.content, end='', flush=True)
 ```
 
 #### Threaded Conversations
 
-Create threaded conversations by tracking parent messages:
+Create threaded conversations by tracking parent messages (int IDs from `ready` chunks).
+Without `parent_message_id`, follow-ups start a new branch with no history.
 
 ```python
 # Start a conversation
@@ -159,10 +182,10 @@ chat_id = api.create_chat_session()
 # Send initial message
 parent_id = None
 for chunk in api.chat_completion(chat_id, "Tell me about neural networks"):
-    if chunk['type'] == 'text':
-        print(chunk['content'], end='', flush=True)
-    elif 'message_id' in chunk:
-        parent_id = chunk['message_id']
+    if chunk.type == 'text':
+        print(chunk.content, end='', flush=True)
+    elif chunk.type == 'ready':
+        parent_id = chunk.response_message_id  # int, e.g. 2
 
 # Send follow-up question in the thread
 for chunk in api.chat_completion(
@@ -170,8 +193,19 @@ for chunk in api.chat_completion(
     "How do they compare to other ML models?",
     parent_message_id=parent_id
 ):
-    if chunk['type'] == 'text':
-        print(chunk['content'], end='', flush=True)
+    if chunk.type == 'text':
+        print(chunk.content, end='', flush=True)
+```
+
+#### Getting an Auth Token
+
+```bash
+# Option 1: automated login (email + password)
+python -m dsk.auth you@example.com yourpassword
+# prints userToken value -> use as DEEPSEEK_AUTH_TOKEN
+
+# Option 2: from browser LocalStorage
+# chat.deepseek.com -> DevTools -> Application -> Local Storage -> userToken -> value
 ```
 
 ### Error Handling
@@ -179,29 +213,29 @@ for chunk in api.chat_completion(
 The package provides specific exceptions for different error scenarios:
 
 ```python
-from dsk.api import (
-    DeepSeekAPI, 
+from dsk import (
+    DeepSeekClient,
     AuthenticationError,
     RateLimitError,
     NetworkError,
-    CloudflareError,
+    WafError,
     APIError
 )
 
 try:
-    api = DeepSeekAPI("YOUR_AUTH_TOKEN")
+    api = DeepSeekClient("YOUR_AUTH_TOKEN")
     chat_id = api.create_chat_session()
     
     for chunk in api.chat_completion(chat_id, "Your prompt here"):
-        if chunk['type'] == 'text':
-            print(chunk['content'], end='', flush=True)
+        if chunk.type == 'text':
+            print(chunk.content, end='', flush=True)
             
 except AuthenticationError:
     print("Authentication failed. Please check your token.")
 except RateLimitError:
     print("Rate limit exceeded. Please wait before making more requests.")
-except CloudflareError as e:
-    print(f"Cloudflare protection encountered: {str(e)}")
+except WafError as e:
+    print(f"WAF protection encountered: {str(e)}")
 except NetworkError:
     print("Network error occurred. Check your internet connection.")
 except APIError as e:

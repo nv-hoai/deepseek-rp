@@ -1,5 +1,11 @@
 curl-cffi==0.8.1b9
 wasmtime
 numpy
-nodriver
 drissionpage
+fastapi
+uvicorn
+requests
+python-dotenv
+pytest
+# Optional: only needed for server.py --headless without a display
+# pyvirtualdisplay

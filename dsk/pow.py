@@ -1,111 +1,102 @@
-"""
-DeepSeek Proof of Work Challenge Implementation
-Author: @xtekky
-Date: 2024
+"""Proof-of-work challenge solver (WebAssembly sha3).
 
-This module implements a proof-of-work challenge solver using WebAssembly (WASM)
-for Custom sha3 hashing. It provides functionality to solve computational challenges
-required for authentication or rate limiting purposes.
+Frontend parity: ``X-DS-PoW-Response: base64(json({algorithm, challenge, salt,
+answer, signature, target_path}))``. The bundled WASM hash
+(``7b9ca65ddd``) matches ``fe-static/.../static/sha3_wasm_bg.*.wasm``.
 """
 
-import json
+from __future__ import annotations
+
 import base64
-import wasmtime
-import numpy as np
-from typing import Dict, Any
+import json
 import os
+from pathlib import Path
+from typing import Any
 
-WASM_PATH = f'{os.path.dirname(__file__)}/wasm/sha3_wasm_bg.7b9ca65ddd.wasm'
+import numpy as np
+import wasmtime
+
+from . import config
+from .models import PowChallenge
+
+WASM_PATH = Path(__file__).parent / "wasm" / config.WASM_FILENAME
+
 
 class DeepSeekHash:
-    def __init__(self):
-        self.instance = None
-        self.memory   = None
-        self.store    = None
-        
-    def init(self, wasm_path: str):
+    def __init__(self) -> None:
+        self.instance: Any = None
+        self.memory: Any = None
+        self.store: Any = None
+
+    def init(self, wasm_path: str | Path) -> "DeepSeekHash":
         engine = wasmtime.Engine()
-        
-        with open(wasm_path, 'rb') as f:
-            wasm_bytes = f.read()
-            
+        wasm_bytes = Path(wasm_path).read_bytes()
         module = wasmtime.Module(engine, wasm_bytes)
-        
         self.store = wasmtime.Store(engine)
-        linker     = wasmtime.Linker(engine)
+        linker = wasmtime.Linker(engine)
         linker.define_wasi()
-        
         self.instance = linker.instantiate(self.store, module)
-        self.memory   = self.instance.exports(self.store)["memory"]
-        
+        self.memory = self.instance.exports(self.store)["memory"]
         return self
-    
+
     def _write_to_memory(self, text: str) -> tuple[int, int]:
-        encoded = text.encode('utf-8')
-        length  = len(encoded)
-        ptr     = self.instance.exports(self.store)["__wbindgen_export_0"](self.store, length, 1)
-        
-        memory_view = self.memory.data_ptr(self.store)
+        encoded = text.encode("utf-8")
+        exports = self.instance.exports(self.store)
+        ptr = exports["__wbindgen_export_0"](self.store, len(encoded), 1)
+        view = self.memory.data_ptr(self.store)
         for i, byte in enumerate(encoded):
-            memory_view[ptr + i] = byte
-            
-        return ptr, length
-    
-    def calculate_hash(self, algorithm: str, challenge: str, salt: str, 
-                      difficulty: int, expire_at: int) -> float:
-        
-        prefix = f"{salt}_{expire_at}_"  
-        retptr = self.instance.exports(self.store)["__wbindgen_add_to_stack_pointer"](self.store, -16)
-        
+            view[ptr + i] = byte
+        return ptr, len(encoded)
+
+    def calculate_hash(self, challenge: str, salt: str,
+                       difficulty: int, expire_at: int) -> int | None:
+        prefix = f"{salt}_{expire_at}_"
+        exports = self.instance.exports(self.store)
+        retptr = exports["__wbindgen_add_to_stack_pointer"](self.store, -16)
         try:
             challenge_ptr, challenge_len = self._write_to_memory(challenge)
-            prefix_ptr, prefix_len       = self._write_to_memory(prefix)
-            
-            self.instance.exports(self.store)["wasm_solve"](
-                self.store,
-                retptr, 
-                challenge_ptr, 
-                challenge_len, 
-                prefix_ptr, 
-                prefix_len, 
-                float(difficulty)
+            prefix_ptr, prefix_len = self._write_to_memory(prefix)
+            exports["wasm_solve"](
+                self.store, retptr,
+                challenge_ptr, challenge_len,
+                prefix_ptr, prefix_len,
+                float(difficulty),
             )
-            
-            memory_view = self.memory.data_ptr(self.store)
-            status      = int.from_bytes(bytes(memory_view[retptr:retptr + 4]), byteorder='little', signed=True)
-            
+            view = self.memory.data_ptr(self.store)
+            status = int.from_bytes(
+                bytes(view[retptr:retptr + 4]), byteorder="little", signed=True)
             if status == 0:
                 return None
-            
-            value_bytes = bytes(memory_view[retptr + 8:retptr + 16])
-            value       = np.frombuffer(value_bytes, dtype=np.float64)[0]
-            
-            return int(value)
-            
+            value_bytes = bytes(view[retptr + 8:retptr + 16])
+            return int(np.frombuffer(value_bytes, dtype=np.float64)[0])
         finally:
-            self.instance.exports(self.store)["__wbindgen_add_to_stack_pointer"](self.store, 16)
+            exports["__wbindgen_add_to_stack_pointer"](self.store, 16)
+
 
 class DeepSeekPOW:
-    def __init__(self):
-        self.hasher = DeepSeekHash().init(WASM_PATH)
-    
-    def solve_challenge(self, config: Dict[str, Any]) -> str:
-        """Solves a proof-of-work challenge and returns the encoded response"""
+    def __init__(self, wasm_path: str | Path = WASM_PATH) -> None:
+        self.hasher = DeepSeekHash().init(os.fspath(wasm_path))
+
+    def solve_challenge(self, challenge: dict[str, Any] | PowChallenge) -> str:
+        """Solve a PoW challenge and return the encoded ``X-DS-PoW-Response``."""
+        data = (challenge if isinstance(challenge, dict)
+                else {"algorithm": challenge.algorithm,
+                      "challenge": challenge.challenge,
+                      "salt": challenge.salt,
+                      "signature": challenge.signature,
+                      "difficulty": challenge.difficulty,
+                      "expire_at": challenge.expire_at,
+                      "target_path": challenge.target_path})
         answer = self.hasher.calculate_hash(
-            config['algorithm'],
-            config['challenge'],
-            config['salt'],
-            config['difficulty'],
-            config['expire_at']
+            data["challenge"], data["salt"],
+            int(data["difficulty"]), int(data["expire_at"]),
         )
-        
         result = {
-            'algorithm': config['algorithm'],
-            'challenge': config['challenge'],
-            'salt': config['salt'],
-            'answer': answer,
-            'signature': config['signature'],
-            'target_path': config['target_path']
+            "algorithm": data["algorithm"],
+            "challenge": data["challenge"],
+            "salt": data["salt"],
+            "answer": answer,
+            "signature": data["signature"],
+            "target_path": data["target_path"],
         }
-        
         return base64.b64encode(json.dumps(result).encode()).decode()
