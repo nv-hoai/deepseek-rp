@@ -47,6 +47,8 @@ def extract_text(content) -> str:
                 parts.append(str(part))
             elif part.get("type") == "text":
                 parts.append(part.get("text", ""))
+            elif part.get("type") in ("image_url", "image"):
+                parts.append("[attached image]")
             elif "text" in part and isinstance(part["text"], str):
                 parts.append(part["text"])
             else:
@@ -321,16 +323,26 @@ def truncate_to_token_budget(text: str, max_tokens: int | None
     return text[:budget], True
 
 
+def extract_images(messages: list[dict]) -> list[str]:
+    """Collect image URLs/data URIs from OpenAI-style content parts."""
+    from .images import extract_openai_images
+
+    return extract_openai_images(messages)
+
+
 def contains_image(messages: list[dict]) -> bool:
-    """Detect image content parts (not supported by DeepSeek web chat)."""
-    for msg in messages:
-        content = (msg.get("content") if isinstance(msg, dict) else None)
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") in (
-                        "image_url", "image"):
-                    return True
-    return False
+    """Legacy check; prefer :func:`extract_images` (vision is supported)."""
+    return bool(extract_images(messages))
+
+
+def resolve_model_type(model: str, has_images: bool, extra: dict) -> str:
+    """Map model name + image presence to a DeepSeek ``model_type``."""
+    override = (extra or {}).get("model_type")
+    if override in ("default", "vision"):
+        return override
+    if has_images or "vision" in (model or "").lower():
+        return "vision"
+    return "default"
 
 
 def truncate_at_stop(text: str, stop) -> str:

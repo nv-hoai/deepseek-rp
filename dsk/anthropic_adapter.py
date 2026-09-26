@@ -52,7 +52,7 @@ def to_openai_messages(system, messages: list[dict]) -> list[dict]:
                     "content": _blocks_to_text(result),
                 })
             elif kind == "image":
-                text_parts.append("[unsupported image content omitted]")
+                text_parts.append("[attached image]")
             else:
                 text_parts.append(str(block))
         if role == "assistant":
@@ -80,7 +80,7 @@ def _blocks_to_text(content) -> str:
             if isinstance(block, dict) and block.get("type") == "text":
                 parts.append(block.get("text", ""))
             elif isinstance(block, dict) and block.get("type") == "image":
-                parts.append("[unsupported image content omitted]")
+                parts.append("[attached image]")
             else:
                 parts.append(adapter.extract_text(block))
         return "".join(parts)
@@ -122,17 +122,16 @@ def to_openai_tool_choice(tool_choice) -> object:
     return tool_choice
 
 
-def has_image(messages: list[dict], system) -> bool:
-    def _scan(content) -> bool:
-        if isinstance(content, list):
-            return any(isinstance(b, dict) and b.get("type") == "image"
-                       for b in content)
-        return False
+def extract_images(system, messages: list[dict]) -> list[str]:
+    """Collect image URLs/data URIs from Anthropic blocks."""
+    from .images import extract_anthropic_images
 
-    if _scan(system):
-        return True
-    return any(_scan(m.get("content")) for m in messages
-               if isinstance(m, dict))
+    return extract_anthropic_images(system, messages)
+
+
+def has_image(messages: list[dict], system) -> bool:
+    """Legacy check; prefer :func:`extract_images` (vision is supported)."""
+    return bool(extract_images(system, messages))
 
 
 def apply_max_tokens(text: str, max_tokens: int | None) -> tuple[str, bool]:

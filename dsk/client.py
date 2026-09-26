@@ -49,11 +49,14 @@ class DeepSeekClient:
         self.cookie_store.save(cookies)
         self.transport.cookies = self.cookie_store.cookies
 
-    def get_pow_challenge(self) -> PowChallenge:
+    def get_pow_challenge(
+        self,
+        target_path: str | None = None,
+    ) -> PowChallenge:
         headers = build_headers(self.auth_token, self.device_id)
         payload = self.transport.request(
             "POST", config.ENDPOINT_POW_CHALLENGE, headers,
-            {"target_path": config.POW_TARGET_PATH},
+            {"target_path": target_path or config.POW_TARGET_PATH},
         )
         try:
             return PowChallenge.from_dict(
@@ -61,6 +64,87 @@ class DeepSeekClient:
         except KeyError as e:
             raise APIError(
                 "Invalid challenge response format from server") from e
+
+    def _solve_for(self, challenge: PowChallenge) -> str:
+        return self.pow_solver.solve_challenge({
+            "algorithm": challenge.algorithm,
+            "challenge": challenge.challenge,
+            "salt": challenge.salt,
+            "signature": challenge.signature,
+            "difficulty": challenge.difficulty,
+            "expire_at": challenge.expire_at,
+            "target_path": challenge.target_path,
+        })
+
+    def upload_file(self, file_bytes: bytes, filename: str,
+                    content_type: str = "image/png") -> dict:
+        """Upload a file; returns the ``biz_data`` record (with ``id``).
+
+        The record starts as ``PENDING``; use :meth:`wait_for_files` before
+        referencing the id in a completion.
+        """
+        if not file_bytes:
+            raise ValueError("Cannot upload empty file")
+        if len(file_bytes) > config.MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"File too large: {len(file_bytes)} bytes "
+                f"(limit {config.MAX_UPLOAD_BYTES})")
+        challenge = self.get_pow_challenge(config.POW_UPLOAD_PATH)
+        headers = build_headers(
+            self.auth_token, self.device_id,
+            pow_response=self._solve_for(challenge))
+        headers.pop("content-type", None)  # multipart sets its own boundary
+        try:
+            payload = self.transport.upload(
+                config.ENDPOINT_UPLOAD, headers,
+                file_bytes, filename, content_type)
+        except WafError:
+            self.refresh_cookies()
+            payload = self.transport.upload(
+                config.ENDPOINT_UPLOAD, headers,
+                file_bytes, filename, content_type)
+        try:
+            return payload["data"]["biz_data"]
+        except KeyError as e:
+            raise APIError(
+                "Invalid upload response format from server") from e
+
+    def fetch_files(self, file_ids: list[str]) -> list[dict]:
+        """Return file records (status, dimensions, audit) for ids."""
+        if not file_ids:
+            return []
+        headers = build_headers(self.auth_token, self.device_id)
+        payload = self.transport.get(
+            config.ENDPOINT_FETCH_FILES, headers,
+            {"file_ids": list(file_ids)})
+        try:
+            return payload["data"]["biz_data"]["files"]
+        except KeyError as e:
+            raise APIError(
+                "Invalid fetch_files response format from server") from e
+
+    def wait_for_files(self, file_ids: list[str],
+                       timeout: float = config.FILE_POLL_TIMEOUT) -> list[dict]:
+        """Poll until every file reports ``SUCCESS``; raise on failure."""
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
+        last: list[dict] = []
+        while True:
+            last = self.fetch_files(file_ids)
+            by_id = {f.get("id"): f for f in last if isinstance(f, dict)}
+            pending = [fid for fid in file_ids if by_id.get(fid, {}).get(
+                "status") not in ("SUCCESS", "FAILED", "ERROR")]
+            failed = [fid for fid in file_ids if by_id.get(fid, {}).get(
+                "status") in ("FAILED", "ERROR")]
+            if failed:
+                raise APIError(f"File processing failed: {failed}")
+            if not pending and len(by_id) == len(file_ids):
+                return last
+            if _time.monotonic() >= deadline:
+                raise APIError(
+                    f"Timed out waiting for files to process: {pending}")
+            _time.sleep(config.FILE_POLL_INTERVAL)
 
     def create_chat_session(self) -> str:
         """Create a session; frontend sends ``{}`` and reads nested id."""
@@ -92,8 +176,13 @@ class DeepSeekClient:
         source: str | None = None,
         action: str | None = None,
         preempt: bool = False,
+        ref_file_ids: list[str] | None = None,
     ) -> Generator[Chunk, None, None]:
-        """Stream a completion. History requires ``parent_message_id`` (int)."""
+        """Stream a completion. History requires ``parent_message_id`` (int).
+
+        Pass ``model_type="vision"`` with ``ref_file_ids`` to ask about
+        uploaded images (see :meth:`upload_file`).
+        """
         request = ChatRequest(
             chat_session_id=chat_session_id,
             prompt=prompt,
@@ -104,19 +193,12 @@ class DeepSeekClient:
             source=source,
             action=action,
             preempt=preempt,
+            ref_file_ids=list(ref_file_ids or []),
         )
         challenge = self.get_pow_challenge()
         headers = build_headers(
             self.auth_token, self.device_id,
-            pow_response=self.pow_solver.solve_challenge({
-                "algorithm": challenge.algorithm,
-                "challenge": challenge.challenge,
-                "salt": challenge.salt,
-                "signature": challenge.signature,
-                "difficulty": challenge.difficulty,
-                "expire_at": challenge.expire_at,
-                "target_path": challenge.target_path,
-            }),
+            pow_response=self._solve_for(challenge),
             sse=True,
         )
         try:

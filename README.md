@@ -40,10 +40,12 @@ dsk/
   openai_adapter.py OpenAI translation (pure) |
   anthropic_adapter.py Anthropic translation (pure) |
   responses_adapter.py Responses translation + chain store |
+  images.py      image extraction + download/decode for vision |
   openai_server.py  agent APIs: chat, messages, responses
 tests/test_sse.py  fixtures for the volatile streaming format
 tests/test_openai_adapter.py  OpenAI translation + endpoint tests
 tests/test_protocols.py  Anthropic/Responses translation + endpoint tests
+tests/test_vision.py  image extraction, upload, vision endpoint tests
 ```
 
 Rules: frontend-mirroring literals live in `config.py`; raw JSON is converted
@@ -73,8 +75,17 @@ Endpoints: `GET /v1/models`, `POST /v1/chat/completions`
 `GET /health`, `GET /health/deep` (validates the DeepSeek token).
 
 Models: `deepseek-chat` (no thinking), `deepseek-reasoner` (thinking,
-returned as `reasoning_content`). Per-request overrides are accepted as
-extra body fields: `thinking_enabled`, `search_enabled`.
+returned as `reasoning_content`), `deepseek-vision` (vision model for image
+input). Per-request overrides are accepted as
+extra body fields: `thinking_enabled`, `search_enabled`, `model_type`.
+
+Vision (image input): pass standard image parts (`image_url` with http(s)
+URL or `data:` URI, Anthropic `image` blocks, Responses `input_image`).
+The server downloads/decodes each image, uploads it via
+`POST /api/v0/file/upload_file`, waits for processing, and sends the
+completion with `model_type="vision"` + `ref_file_ids`. Any model switches
+to vision automatically when images are present; `deepseek-vision` selects
+it with no images attached (text-only vision turn).
 
 Tool calling (agent executes tools): pass standard OpenAI `tools` +
 `tool_choice` (`auto`/`none`/`required` or `{"function": {"name": ...}}`).
@@ -100,11 +111,13 @@ Harness matrix (verified = passing nested run, not just unit tests):
 | Claude Code | Anthropic Messages | unit-tested, live run pending |
 | Codex CLI | Responses API | unit-tested, live run pending |
 
-Known limits: no vision (image input is rejected), `temperature` is
+Known limits: `temperature` is
 accepted but has no effect on this backend, `max_tokens` truncates text
 output, usage tokens are length estimates, each request opens a fresh
 DeepSeek session, and `stop` is enforced on buffered (non-streaming tool
-and protocol) paths.
+and protocol) paths. Vision notes: remote downloads are capped at 20MB,
+uploads at 100MB; malformed image references return 400; the server waits
+up to 60s for file processing before completing.
 
 ## Installation
 

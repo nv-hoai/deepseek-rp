@@ -39,6 +39,8 @@ def _item_text(item: dict) -> str:
             parts.append(str(part))
         elif part.get("type") in ("input_text", "output_text", "text"):
             parts.append(part.get("text", ""))
+        elif part.get("type") in ("input_image", "image_url", "image"):
+            parts.append("[attached image]")
         else:
             parts.append(adapter.extract_text(part))
     return "".join(parts)
@@ -100,6 +102,13 @@ def to_openai_tools(tools: list[dict] | None) -> list[dict] | None:
             },
         })
     return converted or None
+
+
+def extract_images(input_items: list[dict]) -> list[str]:
+    """Collect image URLs/data URIs from Responses API input items."""
+    from .images import extract_responses_images
+
+    return extract_responses_images(input_items)
 
 
 def to_openai_tool_choice(tool_choice) -> object:

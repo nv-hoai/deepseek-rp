@@ -107,8 +107,11 @@ class _FakeClient:
         return "sess-1"
 
     def chat_completion(self, session_id, prompt, thinking_enabled=True,
-                        search_enabled=False):
+                        search_enabled=False, model_type="default",
+                        ref_file_ids=None):
         self.last_prompt = prompt
+        self.last_model_type = model_type
+        self.last_ref_file_ids = ref_file_ids
         if self._thinking:
             yield _FakeChunk("thinking", self._thinking)
         yield _FakeChunk("text", self._text)

@@ -96,7 +96,10 @@ class _FakeClient:
         return "sess-1"
 
     def chat_completion(self, session_id, prompt, thinking_enabled=True,
-                        search_enabled=False):
+                        search_enabled=False, model_type="default",
+                        ref_file_ids=None):
+        self.last_model_type = model_type
+        self.last_ref_file_ids = ref_file_ids
         if self._thinking:
             yield _FakeChunk("thinking", self._thinking)
         yield _FakeChunk("text", self._text)
@@ -135,17 +138,41 @@ def test_anthropic_endpoint_tool_use():
                                    "name": "get_time", "input": {}}
 
 
-def test_anthropic_endpoint_rejects_images():
-    client = TestClient(build_app(lambda: _FakeClient()))
+class _VisionFakeClient(_FakeClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.uploaded = []
+
+    def upload_file(self, file_bytes, filename, content_type="image/png"):
+        self.uploaded.append((filename, content_type, len(file_bytes)))
+        return {"id": "file-test-1", "status": "PENDING"}
+
+    def wait_for_files(self, file_ids, timeout=60):
+        assert file_ids == ["file-test-1"]
+        return [{"id": "file-test-1", "status": "SUCCESS"}]
+
+
+_TINY_PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAA"
+             "AfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def test_anthropic_endpoint_vision_uploads_images():
+    fake = _VisionFakeClient(text="a pink square")
+    client = TestClient(build_app(lambda: fake))
     response = client.post("/v1/messages", json={
         "model": "deepseek-chat",
         "max_tokens": 64,
         "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "What is this?"},
             {"type": "image",
-             "source": {"type": "base64", "data": "x"}}]}],
+             "source": {"type": "base64", "media_type": "image/png",
+                        "data": _TINY_PNG.split(",", 1)[1]}}]}],
     })
-    assert response.status_code == 400
-    assert response.json()["type"] == "error"
+    assert response.status_code == 200
+    assert fake.last_model_type == "vision"
+    assert fake.last_ref_file_ids == ["file-test-1"]
+    assert len(fake.uploaded) == 1
+    assert response.json()["content"][-1]["text"] == "a pink square"
 
 
 def test_anthropic_stream_events():

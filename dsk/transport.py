@@ -134,3 +134,67 @@ class HttpTransport:
         except requests.exceptions.RequestException as e:
             raise NetworkError(
                 f"Network error occurred during streaming: {e}") from e
+
+    def get(self, endpoint: str, headers: dict[str, str],
+            params: dict[str, Any] | None = None) -> dict[str, Any]:
+        url = f"{config.BASE_URL}{endpoint}"
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                cookies=self.cookies,
+                impersonate=config.IMPERSONATE,
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            raise NetworkError(f"Network error occurred: {e}") from e
+
+        body = response.text
+        if is_waf_challenge(response.status_code, response.headers, body):
+            raise WafError("Blocked by WAF protection.")
+        check_http_error(response.status_code, response.headers, body)
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as e:
+            raise APIError("Invalid JSON response from server") from e
+        check_biz_error(payload, f"GET {endpoint}")
+        return payload
+
+    def upload(self, endpoint: str, headers: dict[str, str],
+               file_bytes: bytes, filename: str,
+               content_type: str) -> dict[str, Any]:
+        """Multipart file upload via curl mime (curl-cffi has no files=)."""
+        from curl_cffi.curl import CurlMime
+
+        url = f"{config.BASE_URL}{endpoint}"
+        mime = CurlMime.from_list([{
+            "name": "file",
+            "filename": filename,
+            "content_type": content_type,
+            "data": file_bytes,
+        }])
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                multipart=mime,
+                cookies=self.cookies,
+                impersonate=config.IMPERSONATE,
+                timeout=120,
+            )
+        except requests.exceptions.RequestException as e:
+            raise NetworkError(f"Network error occurred: {e}") from e
+        finally:
+            mime.close()
+
+        body = response.text
+        if is_waf_challenge(response.status_code, response.headers, body):
+            raise WafError("Blocked by WAF protection.")
+        check_http_error(response.status_code, response.headers, body)
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as e:
+            raise APIError("Invalid JSON response from server") from e
+        check_biz_error(payload, f"POST {endpoint}")
+        return payload

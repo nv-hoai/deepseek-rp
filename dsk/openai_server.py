@@ -40,6 +40,8 @@ MODELS = [
      "description": "DeepSeek web chat without thinking"},
     {"id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek",
      "description": "DeepSeek web chat with thinking (reasoning_content)"},
+    {"id": "deepseek-vision", "object": "model", "owned_by": "deepseek",
+     "description": "DeepSeek web chat vision model (image input)"},
 ]
 
 
@@ -150,12 +152,15 @@ async def _run_blocking(func, *args):
 
 
 def _run_deepseek(client, prompt: str, thinking: bool, search: bool,
+                  model_type: str = "default",
+                  ref_file_ids: list[str] | None = None,
                   ) -> tuple[str, str]:
     session_id = client.create_chat_session()
     thinking_parts, text_parts = [], []
     for chunk in client.chat_completion(
             session_id, prompt,
-            thinking_enabled=thinking, search_enabled=search):
+            thinking_enabled=thinking, search_enabled=search,
+            model_type=model_type, ref_file_ids=ref_file_ids):
         if chunk.type == "thinking":
             thinking_parts.append(chunk.content)
         elif chunk.type == "text":
@@ -164,16 +169,40 @@ def _run_deepseek(client, prompt: str, thinking: bool, search: bool,
 
 
 def _collect_live(client, prompt: str, thinking: bool, search: bool,
+                  model_type: str = "default",
+                  ref_file_ids: list[str] | None = None,
                   ) -> Generator[tuple[str, str], None, None]:
     """Yield ``(kind, token)`` live: kind is thinking|text."""
     session_id = client.create_chat_session()
     for chunk in client.chat_completion(
             session_id, prompt,
-            thinking_enabled=thinking, search_enabled=search):
+            thinking_enabled=thinking, search_enabled=search,
+            model_type=model_type, ref_file_ids=ref_file_ids):
         if chunk.type == "thinking" and chunk.content:
             yield ("thinking", chunk.content)
         elif chunk.type == "text" and chunk.content:
             yield ("text", chunk.content)
+
+
+def _prepare_vision_files(client, image_urls: list[str]) -> list[str]:
+    """Resolve images to bytes, upload, await processing; return file ids.
+
+    Blocking: call via :func:`_run_blocking`. Raises ``ValueError`` for bad
+    references (mapped to 400) and ``APIError`` for upload failures.
+    """
+    from .images import resolve_image
+
+    file_ids = []
+    for index, url in enumerate(image_urls):
+        data, filename, content_type = resolve_image(url, index)
+        info = client.upload_file(data, filename, content_type)
+        file_id = info.get("id") if isinstance(info, dict) else None
+        if not file_id:
+            raise APIError(f"Upload returned no file id for {filename}")
+        file_ids.append(file_id)
+    if file_ids:
+        client.wait_for_files(file_ids)
+    return file_ids
 
 
 def _debug_dump(request_id: str, body, prompt: str) -> None:
@@ -198,9 +227,12 @@ def _debug_dump(request_id: str, body, prompt: str) -> None:
 
 
 def _complete_turn(client, prompt: str, thinking: bool, search: bool,
-                   tools_openai, tool_choice_openai, stop=None):
+                   tools_openai, tool_choice_openai, stop=None,
+                   model_type: str = "default",
+                   ref_file_ids: list[str] | None = None):
     """Run one DeepSeek turn; return ``(thinking, content, calls)``."""
-    thinking_text, text = _run_deepseek(client, prompt, thinking, search)
+    thinking_text, text = _run_deepseek(
+        client, prompt, thinking, search, model_type, ref_file_ids)
     if tools_openai and tool_choice_openai != "none":
         content, calls = adapter.parse_tool_calls(text, tools_openai)
     else:
@@ -255,9 +287,9 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
                           "invalid_request_error")
         messages = [m if isinstance(m, dict) else m.model_dump()
                     for m in body.messages]
-        if adapter.contains_image(messages):
-            return _error(400, "image content is not supported by this backend",
-                          "invalid_request_error")
+        image_urls = adapter.extract_images(messages)
+        model_type = adapter.resolve_model_type(
+            body.model, bool(image_urls), body.extra_flags)
         try:
             client = factory()
         except DeepSeekError as e:
@@ -278,16 +310,23 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             _debug_dump(request_id, body, prompt)
 
         try:
+            if image_urls:
+                file_ids = await _run_blocking(
+                    _prepare_vision_files, client, image_urls)
+            else:
+                file_ids = []
             if body.stream:
                 return _stream_response(
                     factory_client=client, request_id=request_id,
                     created=created, model=body.model, prompt=prompt,
                     thinking=thinking, search=search,
                     tools=body.tools, tool_choice=body.tool_choice,
-                    stop=body.stop)
+                    stop=body.stop, model_type=model_type,
+                    ref_file_ids=file_ids)
             thinking_text, content, calls = await _run_blocking(
                 _complete_turn, client, prompt, thinking, search,
-                body.tools if preamble else None, body.tool_choice, body.stop)
+                body.tools if preamble else None, body.tool_choice, body.stop,
+                model_type, file_ids)
             if os.getenv("OPENAI_DEBUG"):
                 import sys as _sys
                 print(f"[debug {request_id}] RAW thinking chars={len(thinking_text)} "
@@ -318,9 +357,7 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             return denied
         if not body.messages:
             return _anthropic_error(400, "messages must not be empty")
-        if anthropic.has_image(body.messages, body.system):
-            return _anthropic_error(
-                400, "image content is not supported by this backend")
+        image_urls = anthropic.extract_images(body.system, body.messages)
         try:
             client = factory()
         except DeepSeekError as e:
@@ -337,6 +374,8 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         if preamble:
             prompt += "\n\n" + preamble
         thinking, search = adapter.resolve_flags(body.model, body.extra_flags)
+        model_type = adapter.resolve_model_type(
+            body.model, bool(image_urls), body.extra_flags)
         if (body.thinking or {}).get("type") == "enabled":
             thinking = True
         elif (body.thinking or {}).get("type") == "disabled":
@@ -346,10 +385,16 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             _debug_dump(request_id=message_id, body=body, prompt=prompt)
 
         try:
+            if image_urls:
+                file_ids = await _run_blocking(
+                    _prepare_vision_files, client, image_urls)
+            else:
+                file_ids = []
             if body.stream:
                 thinking_text, content, calls = await _run_blocking(
                     _complete_turn, client, prompt, thinking, search,
-                    tools if preamble else None, choice)
+                    tools if preamble else None, choice,
+                    None, model_type, file_ids)
                 content, truncated = adapter.truncate_to_token_budget(
                     content, body.max_tokens)
                 prompt_tokens = adapter.estimate_tokens(prompt)
@@ -365,7 +410,8 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
                                          media_type="text/event-stream")
             thinking_text, content, calls = await _run_blocking(
                 _complete_turn, client, prompt, thinking, search,
-                tools if preamble else None, choice)
+                tools if preamble else None, choice,
+                None, model_type, file_ids)
             content, truncated = adapter.truncate_to_token_budget(
                 content, body.max_tokens)
             prompt_tokens = adapter.estimate_tokens(prompt)
@@ -403,9 +449,12 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         chained = store.chain(body.previous_response_id)
         openai_messages = responses.to_openai_messages(
             body.instructions, input_items, chained)
-        if adapter.contains_image(openai_messages):
-            return _error(400, "image content is not supported by this backend",
-                          "invalid_request_error")
+        image_urls = responses.extract_images(input_items) \
+            + adapter.extract_images(openai_messages)
+        # Deduplicate (input items are also flattened into messages).
+        image_urls = list(dict.fromkeys(image_urls))
+        model_type = adapter.resolve_model_type(
+            body.model, bool(image_urls), body.extra_flags)
         tools = responses.to_openai_tools(body.tools)
         choice = responses.to_openai_tool_choice(body.tool_choice)
         prompt = adapter.messages_to_prompt(openai_messages)
@@ -417,10 +466,16 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         created_at = responses.now_epoch()
 
         try:
+            if image_urls:
+                file_ids = await _run_blocking(
+                    _prepare_vision_files, client, image_urls)
+            else:
+                file_ids = []
             if body.stream:
                 thinking_text, content, calls = await _run_blocking(
                     _complete_turn, client, prompt, thinking, search,
-                    tools if preamble else None, choice)
+                    tools if preamble else None, choice,
+                    None, model_type, file_ids)
                 content, _ = adapter.truncate_to_token_budget(
                     content, body.max_output_tokens)
                 payload = responses.build_response(
@@ -432,7 +487,8 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
                                          media_type="text/event-stream")
             thinking_text, content, calls = await _run_blocking(
                 _complete_turn, client, prompt, thinking, search,
-                tools if preamble else None, choice)
+                tools if preamble else None, choice,
+                None, model_type, file_ids)
             content, _ = adapter.truncate_to_token_budget(
                 content, body.max_output_tokens)
             payload = responses.build_response(
@@ -553,7 +609,9 @@ def _responses_stream(response: dict):
 
 def _stream_response(factory_client, request_id: str, created: int,
                      model: str, prompt: str, thinking: bool, search: bool,
-                     tools, tool_choice, stop):
+                     tools, tool_choice, stop,
+                     model_type: str = "default",
+                     ref_file_ids: list[str] | None = None):
     use_tools = bool(tools) and tool_choice != "none"
 
     def event_stream():
@@ -563,7 +621,8 @@ def _stream_response(factory_client, request_id: str, created: int,
             completion_len = 0
             try:
                 for kind, token in _collect_live(
-                        factory_client, prompt, thinking, search):
+                        factory_client, prompt, thinking, search,
+                        model_type, ref_file_ids):
                     completion_len += len(token)
                     if kind == "thinking":
                         yield adapter.sse_chunk(
@@ -583,7 +642,7 @@ def _stream_response(factory_client, request_id: str, created: int,
             return
 
         thinking_text, text = _run_deepseek(
-            factory_client, prompt, thinking, search)
+            factory_client, prompt, thinking, search, model_type, ref_file_ids)
         if os.getenv("OPENAI_DEBUG"):
             import sys as _sys
             print(f"[debug {request_id}] STREAM-RAW thinking chars={len(thinking_text)} "

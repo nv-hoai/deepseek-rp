@@ -27,12 +27,29 @@ ACCEPT_LANGUAGE = (
 )
 
 POW_HEADER = "X-DS-PoW-Response"
-POW_TARGET_PATH = "/api/v0/chat/completion"
+POW_TARGET_PATH = "/api/v0/chat/completion"  # default; see POW_*_PATH below
 
 ENDPOINT_POW_CHALLENGE = "/chat/create_pow_challenge"
 ENDPOINT_COMPLETION = "/chat/completion"
 ENDPOINT_SESSION_CREATE = "/chat_session/create"
+ENDPOINT_UPLOAD = "/file/upload_file"
+ENDPOINT_FETCH_FILES = "/file/fetch_files"
 ENDPOINT_LOGIN = "/users/login"
+
+POW_COMPLETION_PATH = "/api/v0/chat/completion"
+POW_UPLOAD_PATH = "/api/v0/file/upload_file"
+
+# Frontend model types: default, expert, vision. Vision requires uploaded
+# file ids (ref_file_ids) and model_type="vision" on completion.
+VISION_MODEL_TYPE = "vision"
+DEFAULT_MODEL_TYPE = "default"
+
+# Frontend allows up to 50 files / 100MB each; the server caps remote
+# downloads lower to avoid abuse.
+MAX_IMAGE_DOWNLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+FILE_POLL_INTERVAL = 2.0
+FILE_POLL_TIMEOUT = 60.0
 
 WASM_FILENAME = "sha3_wasm_bg.7b9ca65ddd.wasm"
 
