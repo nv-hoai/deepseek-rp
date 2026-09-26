@@ -24,6 +24,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import openai_adapter as adapter
+from . import anthropic_adapter as anthropic
+from . import responses_adapter as responses
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -51,6 +53,46 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int | None = None
     stop: Any = None
     response_format: dict[str, Any] | None = None
+
+    model_config = {"extra": "allow"}
+
+    @property
+    def extra_flags(self) -> dict[str, Any]:
+        extra = self.model_extra or {}
+        return {k: extra[k] for k in ("thinking_enabled", "search_enabled")
+                if k in extra}
+
+
+class AnthropicMessagesRequest(BaseModel):
+    model: str = "deepseek-chat"
+    max_tokens: int = 1024
+    messages: list[dict[str, Any]]
+    system: Any = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any = None
+    stream: bool = False
+    thinking: dict[str, Any] | None = None
+    temperature: float | None = None
+    stop_sequences: list[str] | None = None
+
+    model_config = {"extra": "allow"}
+
+    @property
+    def extra_flags(self) -> dict[str, Any]:
+        extra = self.model_extra or {}
+        return {k: extra[k] for k in ("thinking_enabled", "search_enabled")
+                if k in extra}
+
+
+class ResponsesRequest(BaseModel):
+    model: str = "deepseek-chat"
+    input: Any = None
+    instructions: str | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any = None
+    stream: bool = False
+    max_output_tokens: int | None = None
+    previous_response_id: str | None = None
 
     model_config = {"extra": "allow"}
 
@@ -98,6 +140,13 @@ def _default_client_factory():
         raise AuthenticationError(
             "Server misconfigured: set DEEPSEEK_AUTH_TOKEN")
     return DeepSeekClient(token)
+
+
+async def _run_blocking(func, *args):
+    """Run blocking DeepSeek I/O off the event loop."""
+    import anyio as _anyio
+
+    return await _anyio.to_thread.run_sync(func, *args)
 
 
 def _run_deepseek(client, prompt: str, thinking: bool, search: bool,
@@ -148,6 +197,17 @@ def _debug_dump(request_id: str, body, prompt: str) -> None:
               f"head={text[:300]!r}", file=sys.stderr)
 
 
+def _complete_turn(client, prompt: str, thinking: bool, search: bool,
+                   tools_openai, tool_choice_openai, stop=None):
+    """Run one DeepSeek turn; return ``(thinking, content, calls)``."""
+    thinking_text, text = _run_deepseek(client, prompt, thinking, search)
+    if tools_openai and tool_choice_openai != "none":
+        content, calls = adapter.parse_tool_calls(text, tools_openai)
+    else:
+        content, calls = text, []
+    return thinking_text, adapter.truncate_at_stop(content, stop), calls
+
+
 def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
     factory = client_factory or _default_client_factory
     app = FastAPI(title="DeepSeek OpenAI-compat API")
@@ -162,6 +222,25 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
     async def health():
         return {"status": "ok"}
 
+    @app.get("/health/deep")
+    async def health_deep():
+        """Validate the DeepSeek token via a side-effect-free PoW challenge."""
+        from .exceptions import AuthenticationError as _AuthError
+
+        try:
+            client = factory()
+        except DeepSeekError as e:
+            return _map_error(e)
+        try:
+            import anyio as _anyio
+
+            await _anyio.to_thread.run_sync(client.get_pow_challenge)
+            return {"status": "ok", "deepseek": "reachable"}
+        except _AuthError as e:
+            return _error(503, f"DeepSeek token invalid: {e}", "server_error")
+        except DeepSeekError as e:
+            return _map_error(e)
+
     @app.get("/v1/models")
     async def list_models():
         return {"object": "list", "data": MODELS}
@@ -174,6 +253,11 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         if not body.messages:
             return _error(400, "messages must not be empty",
                           "invalid_request_error")
+        messages = [m if isinstance(m, dict) else m.model_dump()
+                    for m in body.messages]
+        if adapter.contains_image(messages):
+            return _error(400, "image content is not supported by this backend",
+                          "invalid_request_error")
         try:
             client = factory()
         except DeepSeekError as e:
@@ -181,8 +265,7 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         except Exception as e:
             return _map_error(e)
 
-        prompt = adapter.messages_to_prompt(
-            [m if isinstance(m, dict) else m.model_dump() for m in body.messages])
+        prompt = adapter.messages_to_prompt(messages)
         if (body.response_format or {}).get("type") == "json_object":
             prompt += "\n\nRespond with valid JSON only."
         preamble = adapter.build_tool_preamble(body.tools, body.tool_choice)
@@ -201,21 +284,22 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
                     created=created, model=body.model, prompt=prompt,
                     thinking=thinking, search=search,
                     tools=body.tools, tool_choice=body.tool_choice,
-                    prompt_tokens=adapter.estimate_tokens(prompt))
-            thinking_text, text = _run_deepseek(client, prompt, thinking, search)
+                    stop=body.stop)
+            thinking_text, content, calls = await _run_blocking(
+                _complete_turn, client, prompt, thinking, search,
+                body.tools if preamble else None, body.tool_choice, body.stop)
             if os.getenv("OPENAI_DEBUG"):
                 import sys as _sys
                 print(f"[debug {request_id}] RAW thinking chars={len(thinking_text)} "
-                      f"text chars={len(text)}", file=_sys.stderr)
-                print(f"[debug {request_id}] RAW text head={text[:800]!r}",
+                      f"content chars={len(content)} calls={len(calls)}",
                       file=_sys.stderr)
-            content, calls = adapter.parse_tool_calls(text, body.tools) \
-                if preamble else (text, [])
+                print(f"[debug {request_id}] RAW text head={content[:800]!r}",
+                      file=_sys.stderr)
             if calls and not content:
                 content_out: str | None = None
             else:
                 content_out = content
-            completion_tokens = adapter.estimate_tokens(thinking_text + text)
+            completion_tokens = adapter.estimate_tokens(thinking_text + content)
             return adapter.completion_response(
                 request_id, created, body.model, thinking_text, content_out,
                 calls, adapter.estimate_tokens(prompt), completion_tokens)
@@ -224,12 +308,252 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
         except Exception as e:
             return _map_error(e)
 
+    store = responses.ResponseStore()
+
+    @app.post("/v1/messages")
+    async def anthropic_messages(body: AnthropicMessagesRequest,
+                                 request: Request):
+        denied = _check_api_key(request)
+        if denied is not None:
+            return denied
+        if not body.messages:
+            return _anthropic_error(400, "messages must not be empty")
+        if anthropic.has_image(body.messages, body.system):
+            return _anthropic_error(
+                400, "image content is not supported by this backend")
+        try:
+            client = factory()
+        except DeepSeekError as e:
+            return _map_anthropic_error(e)
+        except Exception as e:
+            return _map_anthropic_error(e)
+
+        openai_messages = anthropic.to_openai_messages(
+            body.system, body.messages)
+        tools = anthropic.to_openai_tools(body.tools)
+        choice = anthropic.to_openai_tool_choice(body.tool_choice)
+        prompt = adapter.messages_to_prompt(openai_messages)
+        preamble = adapter.build_tool_preamble(tools, choice)
+        if preamble:
+            prompt += "\n\n" + preamble
+        thinking, search = adapter.resolve_flags(body.model, body.extra_flags)
+        if (body.thinking or {}).get("type") == "enabled":
+            thinking = True
+        elif (body.thinking or {}).get("type") == "disabled":
+            thinking = False
+        message_id = f"msg_{adapter.new_request_id()[9:]}"
+        if os.getenv("OPENAI_DEBUG"):
+            _debug_dump(request_id=message_id, body=body, prompt=prompt)
+
+        try:
+            if body.stream:
+                thinking_text, content, calls = await _run_blocking(
+                    _complete_turn, client, prompt, thinking, search,
+                    tools if preamble else None, choice)
+                content, truncated = adapter.truncate_to_token_budget(
+                    content, body.max_tokens)
+                prompt_tokens = adapter.estimate_tokens(prompt)
+                completion_tokens = adapter.estimate_tokens(
+                    thinking_text + content)
+
+                def anthropic_events():
+                    yield from _anthropic_stream(
+                        message_id, body.model, thinking_text, content,
+                        calls, prompt_tokens, completion_tokens, truncated)
+
+                return StreamingResponse(anthropic_events(),
+                                         media_type="text/event-stream")
+            thinking_text, content, calls = await _run_blocking(
+                _complete_turn, client, prompt, thinking, search,
+                tools if preamble else None, choice)
+            content, truncated = adapter.truncate_to_token_budget(
+                content, body.max_tokens)
+            prompt_tokens = adapter.estimate_tokens(prompt)
+            completion_tokens = adapter.estimate_tokens(
+                thinking_text + content)
+            return anthropic.build_response(
+                body.model, thinking_text, content, calls,
+                prompt_tokens, completion_tokens, truncated)
+        except DeepSeekError as e:
+            return _map_anthropic_error(e)
+        except Exception as e:
+            return _map_anthropic_error(e)
+
+    @app.post("/v1/responses")
+    async def create_response(body: ResponsesRequest, request: Request):
+        denied = _check_api_key(request)
+        if denied is not None:
+            return denied
+        raw_input = body.input
+        input_items = raw_input if isinstance(raw_input, list) \
+            else ([{"type": "message", "role": "user",
+                    "content": [{"type": "input_text",
+                                 "text": str(raw_input)}]}]
+                  if raw_input else [])
+        if not input_items:
+            return _error(400, "input must not be empty",
+                          "invalid_request_error")
+        try:
+            client = factory()
+        except DeepSeekError as e:
+            return _map_error(e)
+        except Exception as e:
+            return _map_error(e)
+
+        chained = store.chain(body.previous_response_id)
+        openai_messages = responses.to_openai_messages(
+            body.instructions, input_items, chained)
+        if adapter.contains_image(openai_messages):
+            return _error(400, "image content is not supported by this backend",
+                          "invalid_request_error")
+        tools = responses.to_openai_tools(body.tools)
+        choice = responses.to_openai_tool_choice(body.tool_choice)
+        prompt = adapter.messages_to_prompt(openai_messages)
+        preamble = adapter.build_tool_preamble(tools, choice)
+        if preamble:
+            prompt += "\n\n" + preamble
+        thinking, search = adapter.resolve_flags(body.model, body.extra_flags)
+        response_id = responses.new_response_id()
+        created_at = responses.now_epoch()
+
+        try:
+            if body.stream:
+                thinking_text, content, calls = await _run_blocking(
+                    _complete_turn, client, prompt, thinking, search,
+                    tools if preamble else None, choice)
+                content, _ = adapter.truncate_to_token_budget(
+                    content, body.max_output_tokens)
+                payload = responses.build_response(
+                    response_id, body.model, created_at, thinking_text,
+                    content, calls, adapter.estimate_tokens(prompt),
+                    adapter.estimate_tokens(thinking_text + content))
+                store.save(response_id, input_items + payload["output"])
+                return StreamingResponse(_responses_stream(payload),
+                                         media_type="text/event-stream")
+            thinking_text, content, calls = await _run_blocking(
+                _complete_turn, client, prompt, thinking, search,
+                tools if preamble else None, choice)
+            content, _ = adapter.truncate_to_token_budget(
+                content, body.max_output_tokens)
+            payload = responses.build_response(
+                response_id, body.model, created_at, thinking_text,
+                content, calls, adapter.estimate_tokens(prompt),
+                adapter.estimate_tokens(thinking_text + content))
+            store.save(response_id, input_items + payload["output"])
+            return payload
+        except DeepSeekError as e:
+            return _map_error(e)
+        except Exception as e:
+            return _map_error(e)
+
+    @app.get("/v1/responses/{response_id}")
+    async def get_response(response_id: str):
+        items = store.chain(response_id)
+        if not items:
+            return _error(404, "response not found", "invalid_request_error")
+        return {"id": response_id, "object": "response", "output": items}
+
     return app
+
+
+def _anthropic_error(status: int, message: str, kind: str = "invalid_request_error"):
+    return JSONResponse(status_code=status, content={
+        "type": "error",
+        "error": {"type": kind, "message": message},
+    })
+
+
+def _map_anthropic_error(e: Exception):
+    if isinstance(e, AuthenticationError):
+        return _anthropic_error(401, str(e), "authentication_error")
+    if isinstance(e, RateLimitError):
+        return _anthropic_error(429, str(e), "rate_limit_error")
+    if isinstance(e, (APIError, NetworkError, WafError)):
+        return _anthropic_error(500, str(e), "api_error")
+    if isinstance(e, (ValueError, KeyError)):
+        return _anthropic_error(400, str(e), "invalid_request_error")
+    return _anthropic_error(500, f"{type(e).__name__}: {e}", "api_error")
+
+
+def _anthropic_stream(message_id: str, model: str, thinking: str,
+                      content: str, calls: list[dict],
+                      prompt_tokens: int, completion_tokens: int,
+                      truncated: bool):
+    def event(kind: str, payload: dict) -> str:
+        return f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    blocks: list[dict] = []
+    if thinking:
+        blocks.append({"type": "thinking", "thinking": thinking})
+    blocks.append({"type": "text", "text": content})
+    for call in calls:
+        blocks.append({"type": "tool_use", "id": call["id"],
+                       "name": call["name"], "input": call["arguments"]})
+    stop_reason = "tool_use" if calls else "end_turn"
+    if truncated:
+        stop_reason = "max_tokens"
+    yield event("message_start", {"type": "message_start", "message": {
+        "id": message_id, "type": "message", "role": "assistant",
+        "model": model, "content": [], "stop_reason": None, "usage": {
+            "input_tokens": prompt_tokens, "output_tokens": 0}}})
+    for index, block in enumerate(blocks):
+        yield event("content_block_start", {
+            "type": "content_block_start", "index": index,
+            "content_block": {k: v for k, v in block.items()}})
+        delta: dict
+        if block["type"] == "thinking":
+            delta = {"type": "thinking_delta", "thinking": block["thinking"]}
+        elif block["type"] == "text":
+            delta = {"type": "text_delta", "text": block["text"]}
+        else:
+            delta = {"type": "input_json_delta",
+                     "partial_json": json.dumps(block["input"],
+                                                ensure_ascii=False)}
+        yield event("content_block_delta", {
+            "type": "content_block_delta", "index": index, "delta": delta})
+        yield event("content_block_stop", {
+            "type": "content_block_stop", "index": index})
+    yield event("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": completion_tokens}})
+    yield event("message_stop", {"type": "message_stop"})
+
+
+def _responses_stream(response: dict):
+    def event(kind: str, payload: dict) -> str:
+        return f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    yield event("response.created", {"type": "response.created",
+                                    "response": response})
+    yield event("response.in_progress", {"type": "response.in_progress",
+                                        "response": response})
+    for index, item in enumerate(response["output"]):
+        yield event("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": index, "item": item})
+        if item["type"] == "message":
+            text = item["content"][0]["text"]
+            for i in range(0, len(text), 200):
+                yield event("response.output_text.delta", {
+                    "type": "response.output_text.delta",
+                    "item_id": item["id"], "output_index": index,
+                    "content_index": 0, "delta": text[i:i + 200]})
+        elif item["type"] == "function_call":
+            yield event("response.function_call_arguments.delta", {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"], "output_index": index,
+                "delta": item["arguments"]})
+        yield event("response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": index, "item": item})
+    yield event("response.completed", {"type": "response.completed",
+                                       "response": response})
 
 
 def _stream_response(factory_client, request_id: str, created: int,
                      model: str, prompt: str, thinking: bool, search: bool,
-                     tools, tool_choice, prompt_tokens: int):
+                     tools, tool_choice, stop):
     use_tools = bool(tools) and tool_choice != "none"
 
     def event_stream():
@@ -270,6 +594,7 @@ def _stream_response(factory_client, request_id: str, created: int,
             except Exception:
                 pass
         content, calls = adapter.parse_tool_calls(text, tools)
+        content = adapter.truncate_at_stop(content, stop)
         yield adapter.sse_chunk(request_id, created, model,
                                 {"role": "assistant"})
         for i in range(0, len(thinking_text), 200):
@@ -309,6 +634,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int,
                         default=int(os.getenv("PORT", "8080")))
-    parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
+    parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     args = parser.parse_args()
+    if not os.getenv("OPENAI_API_KEY"):
+        import sys as _sys
+
+        print("Warning: OPENAI_API_KEY is not set; any client can use this "
+              "server and spend the DeepSeek account quota. Set OPENAI_API_KEY "
+              "for any non-local exposure.", file=_sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port)

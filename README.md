@@ -38,9 +38,12 @@ dsk/
   auth.py        email login    | waf.py       Turnstile/WAF bypass
   server.py      cookie server  | bypass.py    cookie CLI (python -m dsk.bypass)
   openai_adapter.py OpenAI translation (pure) |
-  openai_server.py  OpenAI-compat API (uvicorn dsk.openai_server:app)
+  anthropic_adapter.py Anthropic translation (pure) |
+  responses_adapter.py Responses translation + chain store |
+  openai_server.py  agent APIs: chat, messages, responses
 tests/test_sse.py  fixtures for the volatile streaming format
 tests/test_openai_adapter.py  OpenAI translation + endpoint tests
+tests/test_protocols.py  Anthropic/Responses translation + endpoint tests
 ```
 
 Rules: frontend-mirroring literals live in `config.py`; raw JSON is converted
@@ -58,15 +61,16 @@ in `models.py`/`sse.py` only; `client.py` contains no parsing.
 
 ## OpenAI-compatible server (agent integration)
 
-Expose DeepSeek web chat as an OpenAI Chat Completions API so agent
-frameworks can use it with `base_url="http://localhost:8080/v1"`.
+Expose DeepSeek web chat as agent APIs so harnesses can use it:
 
 ```bash
 DEEPSEEK_AUTH_TOKEN=... uvicorn dsk.openai_server:app --port 8080
 ```
 
 Endpoints: `GET /v1/models`, `POST /v1/chat/completions`
-(`stream: true/false`), `GET /health`.
+(`stream: true/false`), `POST /v1/messages` (Anthropic),
+`POST /v1/responses` + `GET /v1/responses/{id}` (Responses),
+`GET /health`, `GET /health/deep` (validates the DeepSeek token).
 
 Models: `deepseek-chat` (no thinking), `deepseek-reasoner` (thinking,
 returned as `reasoning_content`). Per-request overrides are accepted as
@@ -84,7 +88,23 @@ forwards DeepSeek tokens live; with tools it buffers, then emits
 `reasoning_content`, `content`, and `tool_calls` chunks plus `data: [DONE]`.
 
 Set `OPENAI_API_KEY` to require a client key; otherwise any key is accepted
-and the server's `DEEPSEEK_AUTH_TOKEN` is used for all requests.
+and the server's `DEEPSEEK_AUTH_TOKEN` is used for all requests. The server
+binds `127.0.0.1` by default; a startup warning is printed when no client
+key is set.
+
+Harness matrix (verified = passing nested run, not just unit tests):
+
+| Harness | Protocol | Status |
+| --- | --- | --- |
+| OpenCode | Chat Completions | verified |
+| Claude Code | Anthropic Messages | unit-tested, live run pending |
+| Codex CLI | Responses API | unit-tested, live run pending |
+
+Known limits: no vision (image input is rejected), `temperature` is
+accepted but has no effect on this backend, `max_tokens` truncates text
+output, usage tokens are length estimates, each request opens a fresh
+DeepSeek session, and `stop` is enforced on buffered (non-streaming tool
+and protocol) paths.
 
 ## Installation
 

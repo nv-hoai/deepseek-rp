@@ -310,6 +310,39 @@ def estimate_tokens(text: str) -> int:
     return max(0, len(text or "") // 4)
 
 
+def truncate_to_token_budget(text: str, max_tokens: int | None
+                             ) -> tuple[str, bool]:
+    """Truncate to ~``max_tokens``; return ``(text, truncated)``."""
+    if not max_tokens or max_tokens <= 0:
+        return text, False
+    budget = max_tokens * 4
+    if len(text) <= budget:
+        return text, False
+    return text[:budget], True
+
+
+def contains_image(messages: list[dict]) -> bool:
+    """Detect image content parts (not supported by DeepSeek web chat)."""
+    for msg in messages:
+        content = (msg.get("content") if isinstance(msg, dict) else None)
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in (
+                        "image_url", "image"):
+                    return True
+    return False
+
+
+def truncate_at_stop(text: str, stop) -> str:
+    """Cut text at the first stop sequence (str or list of str)."""
+    if not stop or not text:
+        return text
+    sequences = [stop] if isinstance(stop, str) else list(stop)
+    cuts = [text.find(seq) for seq in sequences
+            if isinstance(seq, str) and seq and seq in text]
+    return text[:min(cuts)] if cuts else text
+
+
 def openai_tool_calls(calls: list[dict]) -> list[dict]:
     return [{
         "id": call["id"],
