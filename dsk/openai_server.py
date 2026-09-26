@@ -752,4 +752,6 @@ if __name__ == "__main__":
               "server and spend the DeepSeek account quota. Set OPENAI_API_KEY "
               "for any non-local exposure.", file=_sys.stderr)
     _preflight_auth()
-    uvicorn.run(app, host=args.host, port=args.port)
+    # lifespan="off": no startup/shutdown handlers exist, and the lifespan
+    # protocol only adds a CancelledError traceback on Ctrl+C.
+    uvicorn.run(app, host=args.host, port=args.port, lifespan="off")
