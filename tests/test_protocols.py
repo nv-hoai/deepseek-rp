@@ -147,6 +147,12 @@ class _VisionFakeClient(_FakeClient):
         self.uploaded.append((filename, content_type, len(file_bytes)))
         return {"id": "file-test-1", "status": "PENDING"}
 
+    def resolve_image_file(self, file_bytes, filename,
+                           content_type="image/png"):
+        info = self.upload_file(file_bytes, filename, content_type)
+        self.wait_for_files([info["id"]])
+        return info["id"]
+
     def wait_for_files(self, file_ids, timeout=60):
         assert file_ids == ["file-test-1"]
         return [{"id": "file-test-1", "status": "SUCCESS"}]

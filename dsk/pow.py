@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,24 @@ from .models import PowChallenge
 
 WASM_PATH = Path(__file__).parent / "wasm" / config.WASM_FILENAME
 
+_COMPILED_LOCK = threading.Lock()
+_COMPILED: dict[str, tuple[Any, Any]] = {}
+
+
+def _compiled_module(wasm_path: str | Path) -> tuple[Any, Any]:
+    """Compile once per process; every request was recompiling the WASM."""
+    key = os.fspath(wasm_path)
+    try:
+        return _COMPILED[key]
+    except KeyError:
+        pass
+    with _COMPILED_LOCK:
+        if key not in _COMPILED:
+            engine = wasmtime.Engine()
+            module = wasmtime.Module(engine, Path(key).read_bytes())
+            _COMPILED[key] = (engine, module)
+        return _COMPILED[key]
+
 
 class DeepSeekHash:
     def __init__(self) -> None:
@@ -29,9 +48,7 @@ class DeepSeekHash:
         self.store: Any = None
 
     def init(self, wasm_path: str | Path) -> "DeepSeekHash":
-        engine = wasmtime.Engine()
-        wasm_bytes = Path(wasm_path).read_bytes()
-        module = wasmtime.Module(engine, wasm_bytes)
+        engine, module = _compiled_module(wasm_path)
         self.store = wasmtime.Store(engine)
         linker = wasmtime.Linker(engine)
         linker.define_wasi()

@@ -225,11 +225,8 @@ def _prepare_vision_files(client, image_urls: list[str]) -> list[str]:
     file_ids = []
     for index, url in enumerate(image_urls):
         data, filename, content_type = resolve_image(url, index)
-        info = client.upload_file(data, filename, content_type)
-        file_id = info.get("id") if isinstance(info, dict) else None
-        if not file_id:
-            raise APIError(f"Upload returned no file id for {filename}")
-        file_ids.append(file_id)
+        file_ids.append(
+            client.resolve_image_file(data, filename, content_type))
     if file_ids:
         client.wait_for_files(file_ids)
     return file_ids
@@ -270,6 +267,10 @@ def _complete_turn(client, prompt: str, thinking: bool, search: bool,
     return thinking_text, adapter.truncate_at_stop(content, stop), calls
 
 
+_DEEP_HEALTH_TTL = 120.0
+_deep_health: dict[str, Any] = {"token": None, "at": 0.0}
+
+
 def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
     factory = client_factory or _default_client_factory
     app = FastAPI(title="DeepSeek OpenAI-compat API")
@@ -286,9 +287,23 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
 
     @app.get("/health/deep")
     async def health_deep():
-        """Validate the DeepSeek token via a side-effect-free PoW challenge."""
+        """Validate the DeepSeek token via a side-effect-free PoW challenge.
+
+        The PoW solve costs seconds of CPU, so results are cached briefly
+        per token instead of re-solving on every poll.
+        """
         from .exceptions import AuthenticationError as _AuthError
 
+        import time as _time
+
+        try:
+            token = await _run_blocking(token_store.resolve_auth_token)
+        except DeepSeekError:
+            token = None
+        if (token is not None and _deep_health["token"] == token
+                and _time.monotonic() - _deep_health["at"]
+                < _DEEP_HEALTH_TTL):
+            return {"status": "ok", "deepseek": "reachable"}
         try:
             client = await _run_blocking(factory)
         except DeepSeekError as e:
@@ -297,6 +312,8 @@ def build_app(client_factory: Callable[[], Any] | None = None) -> FastAPI:
             import anyio as _anyio
 
             await _anyio.to_thread.run_sync(client.get_pow_challenge)
+            if token is not None:
+                _deep_health.update(token=token, at=_time.monotonic())
             return {"status": "ok", "deepseek": "reachable"}
         except _AuthError as e:
             return _error(503, f"DeepSeek token invalid: {e}", "server_error")

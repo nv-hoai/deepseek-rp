@@ -113,6 +113,10 @@ and the server's `DEEPSEEK_AUTH_TOKEN` is used for all requests. The server
 binds `127.0.0.1` by default; a startup warning is printed when no client
 key is set.
 
+Efficiency (fewer upstream calls): the WASM PoW module compiles once per
+process; identical image bytes upload once per hour (revalidated with one
+cheap metadata GET); `GET /health/deep` caches per token for 120s.
+
 Harness matrix (verified = passing nested run, not just unit tests):
 
 | Harness | Protocol | Status |

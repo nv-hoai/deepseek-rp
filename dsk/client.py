@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import threading
 from collections.abc import Generator
 
 from curl_cffi import requests
@@ -11,7 +12,13 @@ from curl_cffi import requests
 from . import config
 from .cookies import CookieStore
 from .device import load_or_create_device_id
-from .exceptions import APIError, AuthenticationError, NetworkError, WafError
+from .exceptions import (
+    APIError,
+    AuthenticationError,
+    DeepSeekError,
+    NetworkError,
+    WafError,
+)
 from .headers import build_headers
 from .models import ChatRequest, Chunk, PowChallenge
 from .pow import DeepSeekPOW
@@ -23,6 +30,47 @@ from .transport import (
     is_waf_challenge,
     warn_version_once,
 )
+
+
+class UploadCache:
+    """Process-wide dedup of identical uploads.
+
+    Agent loops resend the same images every turn; without this each turn
+    costs a PoW solve, a multipart upload, and a ~15s processing wait.
+    Keys mix in the account token so ids never leak across accounts.
+    """
+
+    def __init__(self, ttl: float = 3600.0):
+        self.ttl = ttl
+        self._lock = threading.Lock()
+        self._items: dict[str, tuple[str, float]] = {}
+
+    def get(self, key: str) -> str | None:
+        import time as _time
+
+        with self._lock:
+            hit = self._items.get(key)
+            if hit and _time.monotonic() - hit[1] < self.ttl:
+                return hit[0]
+            self._items.pop(key, None)
+            return None
+
+    def put(self, key: str, file_id: str) -> None:
+        import time as _time
+
+        with self._lock:
+            self._items[key] = (file_id, _time.monotonic())
+
+    def invalidate(self, key: str) -> None:
+        with self._lock:
+            self._items.pop(key, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+
+
+_UPLOAD_CACHE = UploadCache()
 
 
 class DeepSeekClient:
@@ -116,6 +164,34 @@ class DeepSeekClient:
         except KeyError as e:
             raise APIError(
                 "Invalid upload response format from server") from e
+
+    def resolve_image_file(self, file_bytes: bytes, filename: str,
+                           content_type: str = "image/png") -> str:
+        """Upload once per content hash; return the file id.
+
+        Repeat uploads of identical bytes reuse the cached id after one
+        cheap metadata GET (no PoW) confirms it is still ``SUCCESS``.
+        """
+        import hashlib
+
+        key = hashlib.sha256(
+            self.auth_token.encode() + b"\0" + file_bytes).hexdigest()
+        cached = _UPLOAD_CACHE.get(key)
+        if cached is not None:
+            try:
+                records = self.fetch_files([cached])
+            except DeepSeekError:
+                records = []
+            if any(r.get("id") == cached and r.get("status") == "SUCCESS"
+                   for r in records if isinstance(r, dict)):
+                return cached
+            _UPLOAD_CACHE.invalidate(key)
+        info = self.upload_file(file_bytes, filename, content_type)
+        file_id = info.get("id") if isinstance(info, dict) else None
+        if not file_id:
+            raise APIError("Upload returned no file id")
+        _UPLOAD_CACHE.put(key, file_id)
+        return file_id
 
     def fetch_files(self, file_ids: list[str]) -> list[dict]:
         """Return file records (status, dimensions, audit) for ids."""
